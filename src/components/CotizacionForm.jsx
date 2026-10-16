@@ -1,13 +1,14 @@
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
 import { diffCampos, registrarAuditoria } from '../lib/auditoria'
+import { MESES, mesNumero } from '../lib/fechas'
 
 // Campos "planos" de la cotización (referencia, cantidad, valor unitario y total salen de los ítems)
 const CAMPOS = [
   'fecha_envio', 'semana', 'mes', 'n_cotizacion', 'contacto', 'cliente', 'estado', 'motivo_negacion',
   'fecha_op', 'num_op', 'valor_aprobado', 'renta', 'n_factura', 'fecha_facturacion',
 ]
-const NUMERICOS = ['semana', 'valor_aprobado', 'renta']
+const NUMERICOS = ['mes', 'semana', 'valor_aprobado', 'renta']
 const MAX_ITEMS = 50
 
 const VACIO = {
@@ -21,7 +22,7 @@ const input = 'w-full rounded-lg border border-white/10 bg-[#0b1026]/70 px-3 py-
 const label = 'mb-1 block text-xs text-slate-400'
 const cop = (n) => (Number(n) || 0).toLocaleString('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 })
 
-const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
+// El usuario ve el nombre del mes (MESES) y a Supabase se envía el número 1-12 (columna "mes")
 
 function semanaISO(fecha) {
   const d = new Date(fecha + 'T00:00:00')
@@ -49,12 +50,12 @@ function itemsIniciales(registro) {
 }
 
 const mensajeError = (e) =>
-  e.message + (/schema cache|column|relation/i.test(e.message)
+  e.message + (/schema cache|column|relation|invalid input syntax/i.test(e.message)
     ? ' — Ejecuta supabase_schema.sql en Supabase (SQL Editor) y recarga la página.'
     : '')
 
 export default function CotizacionForm({ registro, user, onClose, onSaved }) {
-  const [f, setF] = useState(registro ? { ...VACIO, ...registro } : VACIO)
+  const [f, setF] = useState(registro ? { ...VACIO, ...registro, mes: mesNumero(registro.mes) } : VACIO)
   const [items, setItems] = useState(() => itemsIniciales(registro))
   const [guardando, setGuardando] = useState(false)
   const [error, setError] = useState('')
@@ -66,7 +67,7 @@ export default function CotizacionForm({ registro, user, onClose, onSaved }) {
     const n = { ...p, [k]: v }
     if (k === 'fecha_envio' && v) {
       n.semana = semanaISO(v)
-      n.mes = MESES[new Date(v + 'T00:00:00').getMonth()]
+      n.mes = new Date(v + 'T00:00:00').getMonth() + 1
     }
     return n
   })
@@ -158,7 +159,13 @@ export default function CotizacionForm({ registro, user, onClose, onSaved }) {
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {campo('fecha_envio', 'Fecha Envío', 'date')}
           {campo('semana', 'Semana', 'number')}
-          {campo('mes', 'Mes')}
+          <div>
+            <label className={label}>Mes</label>
+            <select value={f.mes ?? ''} onChange={(e) => set('mes', e.target.value === '' ? '' : Number(e.target.value))} className={input}>
+              <option value="">Seleccionar…</option>
+              {MESES.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+            </select>
+          </div>
           {campo('n_cotizacion', 'N° Cotización', 'text', { required: true })}
           {campo('contacto', 'Contacto')}
           {campo('cliente', 'Cliente', 'text', { required: true })}
