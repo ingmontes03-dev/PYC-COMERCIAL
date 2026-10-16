@@ -8,6 +8,9 @@ import Agenda from './Agenda'
 import Cotizador from './Cotizador'
 import Llamadas from './Llamadas'
 import Usuarios from './Usuarios'
+import PanelAlertas from './PanelAlertas'
+import Prospeccion from './Prospeccion'
+import { mesNombre } from '../lib/fechas'
 
 const cop = (n) => (Number(n) || 0).toLocaleString('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 })
 
@@ -66,6 +69,7 @@ export default function Dashboard({ user, perfil }) {
   const [refreshLog, setRefreshLog] = useState(0)
   const [modal, setModal] = useState(null) // { tipo: 'historial' | 'pendientes', registro }
   const [alertasVencidas, setAlertasVencidas] = useState(0)
+  const [alertasVersion, setAlertasVersion] = useState(0)
   const [errorDatos, setErrorDatos] = useState('')
 
   const cargar = useCallback(async () => {
@@ -81,20 +85,8 @@ export default function Dashboard({ user, perfil }) {
 
   useEffect(() => { cargar() }, [cargar])
 
-  // Cuenta de alertas vencidas (aparece como globo rojo en la pestaña de Agenda)
-  const cargarAlertas = useCallback(async () => {
-    if (!tiene(perfil, 'agenda')) { setAlertasVencidas(0); return }
-    const d = new Date()
-    const hoy = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-    const { count } = await supabase
-      .from('alertas')
-      .select('id', { count: 'exact', head: true })
-      .or('estado.is.null,estado.neq.Completado')
-      .lt('fecha_limite', hoy)
-    setAlertasVencidas(count || 0)
-  }, [perfil])
-
-  useEffect(() => { cargarAlertas() }, [cargarAlertas])
+  // El panel de alertas se vuelve a consultar cada vez que la Agenda cambia algo
+  const refrescarAlertas = useCallback(() => setAlertasVersion((v) => v + 1), [])
 
   const eliminar = async (r) => {
     if (!window.confirm(`¿Eliminar la cotización ${r.n_cotizacion}?`)) return
@@ -139,7 +131,8 @@ export default function Dashboard({ user, perfil }) {
   // Exportar a Excel (CSV con BOM, abre directo en Excel)
   const exportarExcel = () => {
     const enc = COLUMNAS.map((c) => c.t).join(';')
-    const filas = filtrados.map((r) => COLUMNAS.map((c) => `"${String(r[c.k] ?? '').replace(/"/g, '""')}"`).join(';'))
+    const valorCsv = (r, c) => (c.k === 'mes' ? mesNombre(r[c.k]) : r[c.k] ?? '')
+    const filas = filtrados.map((r) => COLUMNAS.map((c) => `"${String(valorCsv(r, c)).replace(/"/g, '""')}"`).join(';'))
     const blob = new Blob(['﻿' + [enc, ...filas].join('\n')], { type: 'text/csv;charset=utf-8;' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
@@ -152,6 +145,7 @@ export default function Dashboard({ user, perfil }) {
     if (c.k === 'estado') return <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${BADGE[v] || ''}`}>{v}</span>
     if (v === null || v === undefined || v === '') return <span className="text-slate-600">—</span>
     if (c.money) return cop(v)
+    if (c.k === 'mes') return mesNombre(v)
     return v
   }
 
@@ -161,6 +155,7 @@ export default function Dashboard({ user, perfil }) {
     { id: 'historial', t: 'Historial de Auditoría', ok: can('historial') },
     { id: 'cotizador', t: 'Cotizador Rápido', ok: can('cotizador') },
     { id: 'llamadas', t: 'Llamadas / Base de Datos', ok: can('llamadas') },
+    { id: 'prospeccion', t: 'Prospección Comercial', ok: can('prospeccion') },
     { id: 'usuarios', t: 'Usuarios y Permisos', ok: esSuper },
   ].filter((t) => t.ok)
   const tabActiva = TABS.some((t) => t.id === tab) ? tab : TABS[0]?.id
@@ -196,6 +191,12 @@ export default function Dashboard({ user, perfil }) {
             <p className="font-semibold text-white">Tu cuenta aún no tiene permisos asignados</p>
             <p className="mt-1 text-sm text-slate-300">Pídele al super administrador que te active los módulos que necesitas.</p>
           </div>
+        )}
+
+        {/* ALERTAS Y PENDIENTES: vencidas, hoy, próximos 7 días y seguimiento comercial */}
+        {can('agenda') && (
+          <PanelAlertas cotizaciones={datos} version={alertasVersion} onVencidas={setAlertasVencidas}
+            onVerAgenda={() => setTab('agenda')} />
         )}
 
         {verCotizaciones && (
@@ -308,10 +309,11 @@ export default function Dashboard({ user, perfil }) {
                 </button>
               ))}
             </div>
-            {tabActiva === 'agenda' && <Agenda user={user} onChange={cargarAlertas} />}
+            {tabActiva === 'agenda' && <Agenda user={user} onChange={refrescarAlertas} />}
             {tabActiva === 'historial' && <Historial refresh={refreshLog} />}
             {tabActiva === 'cotizador' && <Cotizador cotizaciones={datos} />}
             {tabActiva === 'llamadas' && <Llamadas user={user} />}
+            {tabActiva === 'prospeccion' && <Prospeccion user={user} />}
             {tabActiva === 'usuarios' && <Usuarios user={user} />}
           </section>
         )}
@@ -335,7 +337,7 @@ export default function Dashboard({ user, perfil }) {
             </div>
             {modal.tipo === 'historial'
               ? <Historial registroId={modal.registro.id} refresh={refreshLog} />
-              : <Agenda user={user} cotizacionId={modal.registro.id} nCotizacion={modal.registro.n_cotizacion} onChange={cargarAlertas} />}
+              : <Agenda user={user} cotizacionId={modal.registro.id} nCotizacion={modal.registro.n_cotizacion} onChange={refrescarAlertas} />}
           </div>
         </div>
       )}
