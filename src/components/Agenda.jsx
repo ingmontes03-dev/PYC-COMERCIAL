@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
-
-const hoy0 = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d }
+import { diasEntre, hoyStr, soloFecha } from '../lib/fechas'
 
 // Rojo: vencida · Amarillo: vence hoy/mañana · Verde: a tiempo
 export function semaforo(fecha, estado) {
@@ -11,7 +10,7 @@ export function semaforo(fecha, estado) {
   if (!fecha) {
     return { nivel: 'sin', txt: 'Sin fecha límite', cls: 'bg-slate-500/20 text-slate-300 border-slate-500/30' }
   }
-  const dias = Math.round((new Date(String(fecha).slice(0, 10) + 'T00:00:00') - hoy0()) / 86400000)
+  const dias = diasEntre(hoyStr(), soloFecha(fecha))
   if (dias < 0) return { nivel: 'rojo', txt: `Vencida (${-dias}d)`, cls: 'bg-red-500/15 text-red-300 border-red-500/40' }
   if (dias <= 1) return { nivel: 'amarillo', txt: dias === 0 ? 'Vence hoy' : 'Vence mañana', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/40' }
   return { nivel: 'verde', txt: `A tiempo (${dias}d)`, cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40' }
@@ -37,7 +36,7 @@ export default function Agenda({ user, cotizacionId, nCotizacion, onChange }) {
     } else {
       // Orden en el cliente: así no se oculta ninguna fila aunque falte la fecha
       const ordenadas = (data || []).slice().sort((a, b) =>
-        String(a.fecha_limite || '9999-12-31').localeCompare(String(b.fecha_limite || '9999-12-31'))
+        soloFecha(a.fecha_limite || '9999-12-31').localeCompare(soloFecha(b.fecha_limite || '9999-12-31'))
       )
       setItems(ordenadas)
       setError('')
@@ -114,7 +113,7 @@ export default function Agenda({ user, cotizacionId, nCotizacion, onChange }) {
               <div className="min-w-[160px] flex-1">
                 <p className={`text-sm font-medium text-white ${t.estado === 'Completado' ? 'line-through opacity-60' : ''}`}>{texto}</p>
                 <p className="text-xs opacity-80">
-                  Límite: {t.fecha_limite ? String(t.fecha_limite).slice(0, 10) : '—'} · {s.txt}
+                  Límite: {t.fecha_limite ? soloFecha(t.fecha_limite) : '—'} · {s.txt}
                   {t.n_cotizacion ? ` · Cotización ${t.n_cotizacion}` : ''}
                 </p>
               </div>
