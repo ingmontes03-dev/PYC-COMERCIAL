@@ -139,7 +139,6 @@ export default function CotizacionForm({ registro, user, onClose, onSaved }) {
       n.mes = new Date(v + 'T00:00:00').getMonth() + 1
     }
     if (k === 'fecha_op' && !entregaManual) n.fecha_entrega = entregaEstimada(v)
-    if (k === 'estado' && v === 'Aprobado' && !entregaManual && !p.fecha_entrega && p.fecha_op) n.fecha_entrega = entregaEstimada(p.fecha_op)
     return n
   })
 
