@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+html, body, #root {
+  min-height: 100%;
+  background: #0b1026;
+}
+
+@media print {
+  header, section:nth-of-type(2), button { display: none !important; }
+}
