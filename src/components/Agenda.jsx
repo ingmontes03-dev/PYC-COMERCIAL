@@ -433,6 +433,7 @@ export default function Agenda({
               <li key={t.id} className={`flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3 ${s.cls}`}>
                 <div className="min-w-[200px] flex-1">
                   <p className={`text-sm font-medium text-white ${t.estado === 'Completado' ? 'line-through opacity-60' : ''}`}>{texto}</p>
+                  {t.descripcion && t.titulo && <p className="text-xs opacity-80">✉ {t.descripcion}</p>}
                   <p className="text-xs opacity-90">
                     Límite: {t.fecha_limite ? soloFecha(t.fecha_limite) : '—'}
                     {rangos.length ? ` · ⏰ ${textoRangos(t)}` : ' · sin horario'} · {s.txt}
