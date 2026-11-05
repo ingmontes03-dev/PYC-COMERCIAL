@@ -114,10 +114,12 @@ const mensajeError = (e) =>
     ? ' — Ejecuta supabase_schema.sql completo en Supabase (SQL Editor) y recarga la página.'
     : '')
 
-export default function CotizacionForm({ registro, user, onClose, onSaved }) {
-  const [f, setF] = useState(() => formInicial(registro))
-  const [items, setItems] = useState(() => itemsIniciales(registro))
-  const [nTexto, setNTexto] = useState(() => String(itemsIniciales(registro).length))
+export default function CotizacionForm({ registro, borrador, user, onClose, onSaved }) {
+  // borrador: cliente e ítems que llegan desde el Cotizador (cotización nueva precargada)
+  const base = registro || borrador || null
+  const [f, setF] = useState(() => formInicial(base))
+  const [items, setItems] = useState(() => itemsIniciales(base))
+  const [nTexto, setNTexto] = useState(() => String(itemsIniciales(base).length))
   const [fletes, setFletes] = useState(() => fletesIniciales(registro))
   const [gastos, setGastos] = useState(() => gastosIniciales(registro))
   // La fecha de entrega se calcula sola mientras nadie la cambie a mano
@@ -139,6 +141,7 @@ export default function CotizacionForm({ registro, user, onClose, onSaved }) {
       n.mes = new Date(v + 'T00:00:00').getMonth() + 1
     }
     if (k === 'fecha_op' && !entregaManual) n.fecha_entrega = entregaEstimada(v)
+    if (k === 'estado' && v === 'Aprobado' && !entregaManual && !p.fecha_entrega && p.fecha_op) n.fecha_entrega = entregaEstimada(p.fecha_op)
     return n
   })
 
