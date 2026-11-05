@@ -242,12 +242,13 @@ export default function Dashboard({ user, perfil }) {
                       <th className={th}>N° Factura</th>
                       <th className={th}>Fecha fact.</th>
                       <th className={th}>Entrega</th>
+                      <th className={th}>Registrada</th>
                       <th className={`${th} sticky right-0 z-20 bg-[#1b2150]`}>Acciones</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {cargando && <tr><td colSpan={19} className="p-6 text-center text-slate-400">Cargando…</td></tr>}
-                    {!cargando && !filtradas.length && <tr><td colSpan={19} className="p-6 text-center text-slate-400">No hay cotizaciones para mostrar.</td></tr>}
+                    {cargando && <tr><td colSpan={20} className="p-6 text-center text-slate-400">Cargando…</td></tr>}
+                    {!cargando && !filtradas.length && <tr><td colSpan={20} className="p-6 text-center text-slate-400">No hay cotizaciones para mostrar.</td></tr>}
                     {filtradas.map((c) => (
                       <tr key={c.id} className="group border-t border-white/5 hover:bg-white/[0.03]">
                         <td className={`${td} sticky left-0 z-10 w-[120px] min-w-[120px] bg-[#141a3d] font-semibold text-white`}>{c.n_cotizacion}</td>
@@ -268,6 +269,9 @@ export default function Dashboard({ user, perfil }) {
                         <td className={td}>{c.n_factura || '—'}</td>
                         <td className={td}>{soloFecha(c.fecha_facturacion) || '—'}</td>
                         <td className={td}>{soloFecha(c.fecha_entrega) || '—'}</td>
+                        <td className={`${td} text-xs text-slate-400`}>
+                          {c.created_at ? new Date(c.created_at).toLocaleString('es-CO', { timeZone: 'America/Bogota', dateStyle: 'short', timeStyle: 'short' }) : '—'}
+                        </td>
                         <td className={`${td} sticky right-0 z-10 bg-[#141a3d]`}>
                           <div className="flex items-center gap-3 text-xs">
                             {puedeEditar && <button onClick={() => setForm(c)} className="text-blue-300 hover:text-blue-200" title="Editar">Editar</button>}
@@ -297,7 +301,7 @@ export default function Dashboard({ user, perfil }) {
                 <Agenda user={user} nombre={nombre} superAdmin={superAdmin} clientes={clientes} cotizaciones={cotizaciones}
                   filtroForzado={filtroAgenda} onChange={refrescarAlertas} />
               )}
-              {tab === 'cotizador' && tiene(perfil, 'cotizador') && <Cotizador cotizaciones={cotizaciones} />}
+              {tab === 'cotizador' && tiene(perfil, 'cotizador') && <Cotizador cotizaciones={cotizaciones} onCrear={puedeCrear ? (d) => setForm({ borrador: d }) : undefined} />}
               {tab === 'bd' && <BaseDatos user={user} perfil={perfil} />}
               {tab === 'historial' && tiene(perfil, 'historial') && <Historial />}
               {tab === 'usuarios' && superAdmin && <Usuarios user={user} />}
@@ -309,6 +313,7 @@ export default function Dashboard({ user, perfil }) {
       {form && (
         <CotizacionForm
           registro={form.id ? form : null}
+          borrador={form.borrador}
           user={user}
           onClose={() => setForm(null)}
           onSaved={() => { setForm(null); cargar() }}
