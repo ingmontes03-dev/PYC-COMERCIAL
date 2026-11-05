@@ -78,9 +78,35 @@ const horaTexto = (a) => {
   const r = rangosDe(a)
   return r.length ? `, de ${r.map((x) => `${x.ini} a ${x.fin}`).join(' y de ')}` : ''
 }
-const describe = (a) => `${a.titulo || a.descripcion}${a.cliente ? `, cliente ${a.cliente}` : ''}${horaTexto(a)}.`
-const describeConFecha = (a) =>
-  `${a.titulo || a.descripcion}${a.cliente ? `, cliente ${a.cliente}` : ''}, el ${fechaHablada(a.fecha_limite)}${horaTexto(a)}.`
+const limpiaDetalle = (s) => String(s || '').replace(/https?:\/\/\S+/g, '').replace(/\S+@\S+/g, '').replace(/\s+/g, ' ').trim()
+const sinPunto = (s) => String(s || '').trim().replace(/[.!?]+$/, '')
+
+// Reseña corta de qué trata la alerta: la tarea, el cliente, la cotización y el detalle
+// (sin correos ni enlaces). Ej.: "Llamar a Valle de Lili, cotización 1234, confirmar el pedido de uniformes"
+function resena(a) {
+  const titulo = sinPunto(a.titulo || a.descripcion)
+  const partes = [titulo]
+  const cliente = sinPunto(a.cliente)
+  if (cliente && !sinTildes(titulo).includes(sinTildes(cliente))) partes.push(`cliente ${cliente}`)
+  if (a.n_cotizacion) partes.push(`cotización ${a.n_cotizacion}`)
+  if (a.descripcion && a.titulo) {
+    if (/^fecha especial/i.test(titulo)) {
+      const nombres = String(a.descripcion).split('|').map((x) => x.split(' · ')[0].trim()).filter(Boolean)
+      if (nombres.length) partes.push(`${nombres.length > 1 ? 'contactos' : 'contacto'}: ${nombres.slice(0, 3).join(', ')}`)
+    } else {
+      const d = sinPunto(limpiaDetalle(a.descripcion))
+      if (d) partes.push(d.length > 160 ? d.slice(0, 160) : d)
+    }
+  }
+  return partes.join(', ')
+}
+
+const describe = (a) => `${resena(a)}${horaTexto(a)}.`
+const describeConFecha = (a) => `${resena(a)}, el ${fechaHablada(a.fecha_limite)}${horaTexto(a)}.`
+const describeVencida = (a, hoy) => {
+  const d = diasEntre(soloFecha(a.fecha_limite), hoy)
+  return `${resena(a)}, ${d <= 1 ? 'venció ayer' : `venció hace ${d} días`}.`
+}
 const porHora = (a, b) => (rangosDe(a)[0]?.ini || '99').localeCompare(rangosDe(b)[0]?.ini || '99')
 const porFechaHora = (a, b) => soloFecha(a.fecha_limite).localeCompare(soloFecha(b.fecha_limite)) || porHora(a, b)
 const ORDINALES = ['Primero', 'Segundo', 'Tercero', 'Cuarto', 'Quinto']
@@ -88,7 +114,7 @@ const ORDINALES = ['Primero', 'Segundo', 'Tercero', 'Cuarto', 'Quinto']
 export default function VozAlertas({ user, nombre, cotizaciones = [], version = 0 }) {
   const [activa, setActiva] = useState(() => leer('pyc_voz', 'off') === 'on')
   const [voces, setVoces] = useState([])
-  const [vozNombre, setVozNombre] = useState(() => leer('pyc_voz_nombre', ''))
+  const [vozNombre, setVozNombre] = useState(() => leer('pyc_voz_nombre2', '')) // clave nueva: descarta la voz guardada antes (p. ej. Raul) y vuelve a la automática
   const [velocidad, setVelocidad] = useState(() => Number(leer('pyc_voz_vel', '1')) || 1)
   const [alertas, setAlertas] = useState([])
   const [ultimo, setUltimo] = useState('')
@@ -168,7 +194,10 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
       partes.push(`Hoy tienes ${plural(deHoy.length, 'pendiente', 'pendientes')}.`)
       deHoy.slice(0, 6).forEach((a) => partes.push(describe(a)))
     }
-    if (vencidas.length) partes.push(`Atención: tienes ${plural(vencidas.length, 'alerta vencida', 'alertas vencidas')}.`)
+    if (vencidas.length) {
+      partes.push(`Atención: tienes ${plural(vencidas.length, 'alerta vencida', 'alertas vencidas')}.`)
+      vencidas.sort(porFechaHora).slice(0, 5).forEach((a) => partes.push(describeVencida(a, hoy)))
+    }
 
     const entregasManana = cotizaciones.filter((c) => c.estado === 'Aprobado' && soloFecha(c.fecha_entrega) === sig)
     if (!deManana.length && !entregasManana.length) {
@@ -207,6 +236,8 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
       const valor = pend.reduce((a, c) => a + (Number(c.valor_total) || 0), 0)
       partes.push(`Tienes ${plural(pend.length, 'cotización pendiente', 'cotizaciones pendientes')} por un valor de ${pesos(valor)}.`)
       if (seg) partes.push(`${seg === 1 ? 'Una lleva' : `${seg} llevan`} siete días o más sin respuesta y ${seg === 1 ? 'necesita' : 'necesitan'} seguimiento.`)
+      const antiguas = [...pend].sort((a, b) => soloFecha(a.fecha_envio || a.created_at).localeCompare(soloFecha(b.fecha_envio || b.created_at))).slice(0, 3)
+      partes.push(`${pend.length > 3 ? 'Las más antiguas son' : 'Son'}: ${antiguas.map((c) => `${c.cliente || 'sin cliente'}${c.n_cotizacion ? `, número ${c.n_cotizacion}` : ''}, por ${pesos(c.valor_total)}`).join('; ')}.`)
     } else {
       partes.push('No tienes cotizaciones pendientes.')
     }
@@ -214,6 +245,7 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
     if (aprob.length) {
       const valor = aprob.reduce((a, c) => a + (Number(c.valor_aprobado) || Number(c.valor_total) || 0), 0)
       partes.push(`Hay ${plural(aprob.length, 'cotización aprobada', 'cotizaciones aprobadas')} por ${pesos(valor)}.`)
+      partes.push(`${aprob.length > 3 ? 'Las más recientes son' : 'Son'}: ${aprob.slice(0, 3).map((c) => `${c.cliente || 'sin cliente'}${c.n_cotizacion ? `, número ${c.n_cotizacion}` : ''}, por ${pesos(Number(c.valor_aprobado) || Number(c.valor_total) || 0)}`).join('; ')}.`)
       const sinFactura = aprob.filter((c) => !String(c.n_factura || '').trim()).length
       if (sinFactura) partes.push(`${sinFactura === 1 ? 'Una está' : `${sinFactura} están`} aún sin factura.`)
     } else {
@@ -352,7 +384,7 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
       )}
       <button onClick={() => window.speechSynthesis.cancel()} className={boton}>Callar</button>
       {!!voces.length && (
-        <select value={vozNombre} onChange={(e) => { setVozNombre(e.target.value); guardar('pyc_voz_nombre', e.target.value) }} className={select} aria-label="Voz">
+        <select value={vozNombre} onChange={(e) => { setVozNombre(e.target.value); guardar('pyc_voz_nombre2', e.target.value) }} className={select} aria-label="Voz">
           <option value="">Automática · mejor voz latina femenina</option>
           {voces.map((v) => <option key={v.name} value={v.name}>{v.name} ({etiquetaLang(v.lang)})</option>)}
         </select>
