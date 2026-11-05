@@ -5,6 +5,8 @@ import { ahoraHHMM, diasEntre, fmtFecha, hoyStr, rangosDe, soloFecha } from '../
 // Asistente de voz: usa la voz sintetizada del navegador (Web Speech API), sin servicios externos ni costo.
 // Solo habla mientras PYC Comercial está abierto en una pestaña.
 const hayVoz = typeof window !== 'undefined' && 'speechSynthesis' in window
+const Reconocimiento = typeof window !== 'undefined' ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null
+const ZONA = 'America/Bogota'
 
 const leer = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v } catch { return d } }
 const guardar = (k, v) => { try { localStorage.setItem(k, v) } catch { /* sin almacenamiento */ } }
@@ -37,7 +39,9 @@ const etiquetaLang = (l = '') => {
 }
 
 // ---------- Texto hablado ----------
+// (se evitan los puntos dentro de las frases —p. m., Cot.— porque el texto se lee frase por frase)
 const plural = (n, uno, varios) => `${n} ${n === 1 ? uno : varios}`
+const sinTildes = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
 
 // 1500000 -> "1,5 millones de pesos"; así la voz no lee cifras interminables
 function pesos(n) {
@@ -52,12 +56,34 @@ function pesos(n) {
 
 const manana = () => { const d = new Date(); d.setDate(d.getDate() + 1); return fmtFecha(d) }
 
+// "2026-11-07" -> "viernes 7 de noviembre"
+const fechaHablada = (s) => {
+  const [y, m, d] = soloFecha(s).split('-').map(Number)
+  if (!y) return ''
+  return new Date(y, m - 1, d).toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long' })
+}
+
+// Fecha y hora de un registro (hora de Colombia): "jueves 5 de noviembre a las 3:20 de la tarde"
+function registroHablado(v) {
+  const d = v ? new Date(v) : null
+  if (!d || Number.isNaN(d.getTime())) return ''
+  const dia = d.toLocaleDateString('es-CO', { timeZone: ZONA, weekday: 'long', day: 'numeric', month: 'long' })
+  const [hh, mm] = d.toLocaleTimeString('en-GB', { timeZone: ZONA, hour: '2-digit', minute: '2-digit', hour12: false }).split(':').map(Number)
+  const h12 = hh % 12 === 0 ? 12 : hh % 12
+  const momento = hh < 12 ? 'de la mañana' : hh < 19 ? 'de la tarde' : 'de la noche'
+  return `${dia} a las ${h12}:${String(mm).padStart(2, '0')} ${momento}`
+}
+
 const horaTexto = (a) => {
   const r = rangosDe(a)
   return r.length ? `, de ${r.map((x) => `${x.ini} a ${x.fin}`).join(' y de ')}` : ''
 }
 const describe = (a) => `${a.titulo || a.descripcion}${a.cliente ? `, cliente ${a.cliente}` : ''}${horaTexto(a)}.`
+const describeConFecha = (a) =>
+  `${a.titulo || a.descripcion}${a.cliente ? `, cliente ${a.cliente}` : ''}, el ${fechaHablada(a.fecha_limite)}${horaTexto(a)}.`
 const porHora = (a, b) => (rangosDe(a)[0]?.ini || '99').localeCompare(rangosDe(b)[0]?.ini || '99')
+const porFechaHora = (a, b) => soloFecha(a.fecha_limite).localeCompare(soloFecha(b.fecha_limite)) || porHora(a, b)
+const ORDINALES = ['Primero', 'Segundo', 'Tercero', 'Cuarto', 'Quinto']
 
 export default function VozAlertas({ user, nombre, cotizaciones = [], version = 0 }) {
   const [activa, setActiva] = useState(() => leer('pyc_voz', 'off') === 'on')
@@ -66,7 +92,10 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
   const [velocidad, setVelocidad] = useState(() => Number(leer('pyc_voz_vel', '1')) || 1)
   const [alertas, setAlertas] = useState([])
   const [ultimo, setUltimo] = useState('')
+  const [escuchando, setEscuchando] = useState(false)
+  const [oido, setOido] = useState('')
   const dichas = useRef(new Set()) // recordatorios ya dichos hoy
+  const cola = useRef([]) // referencias a las frases en cola (si no, Chrome las descarta y la voz se corta a la mitad)
 
   // Voces del sistema en español, ordenadas: primero las latinas femeninas más naturales
   useEffect(() => {
@@ -89,16 +118,15 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
     if (!hayVoz || !texto) return
     window.speechSynthesis.cancel()
     // Frase por frase: algunas voces (Google) se cortan si el texto es largo
-    const frases = texto.match(/[^.!?]+[.!?]*/g) || [texto]
-    frases.forEach((f) => {
-      const t = f.trim()
-      if (!t) return
+    const frases = (texto.match(/[^.!?]+[.!?]*/g) || [texto]).map((f) => f.trim()).filter(Boolean)
+    const v = voces.find((x) => x.name === vozNombre) || voces[0]
+    cola.current = frases.map((t) => {
       const u = new SpeechSynthesisUtterance(t)
-      const v = voces.find((x) => x.name === vozNombre) || voces[0]
       if (v) { u.voice = v; u.lang = v.lang } else u.lang = 'es-CO'
       u.rate = velocidad
-      window.speechSynthesis.speak(u)
+      return u
     })
+    cola.current.forEach((u) => window.speechSynthesis.speak(u))
     setUltimo(texto)
   }, [voces, vozNombre, velocidad])
 
@@ -123,17 +151,18 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
     return propias().filter((a) => diasEntre(hoy, soloFecha(a.fecha_limite)) <= 0)
   }, [propias])
 
-  const resumen = useCallback(() => {
+  // --- Hoy, mañana y los pendientes más próximos ---
+  const textoAgenda = useCallback(() => {
     const hoy = hoyStr()
     const sig = manana()
     const lista = mias()
     const deHoy = lista.filter((a) => soloFecha(a.fecha_limite) === hoy).sort(porHora)
     const vencidas = lista.filter((a) => soloFecha(a.fecha_limite) < hoy)
-    const deManana = propias().filter((a) => soloFecha(a.fecha_limite) === sig).sort(porHora)
+    const abiertas = propias()
+    const deManana = abiertas.filter((a) => soloFecha(a.fecha_limite) === sig).sort(porHora)
+    const proximos = abiertas.filter((a) => soloFecha(a.fecha_limite) > sig).sort(porFechaHora)
+    const partes = []
 
-    const partes = [`${saludo()}, ${(nombre || '').split(' ')[0] || 'bienvenido'}.`]
-
-    // --- Hoy ---
     if (!deHoy.length && !vencidas.length) partes.push('No tienes alertas pendientes para hoy.')
     if (deHoy.length) {
       partes.push(`Hoy tienes ${plural(deHoy.length, 'pendiente', 'pendientes')}.`)
@@ -141,7 +170,6 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
     }
     if (vencidas.length) partes.push(`Atención: tienes ${plural(vencidas.length, 'alerta vencida', 'alertas vencidas')}.`)
 
-    // --- Mañana ---
     const entregasManana = cotizaciones.filter((c) => c.estado === 'Aprobado' && soloFecha(c.fecha_entrega) === sig)
     if (!deManana.length && !entregasManana.length) {
       partes.push('Para mañana no tienes alertas programadas.')
@@ -159,10 +187,21 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
       }
     }
 
-    // --- Cotizaciones pendientes y aprobadas ---
+    if (proximos.length) {
+      partes.push(`Tus próximos pendientes después de mañana son ${proximos.length === 1 ? 'uno' : Math.min(proximos.length, 5)}.`)
+      proximos.slice(0, 5).forEach((a) => partes.push(describeConFecha(a)))
+      if (proximos.length > 5) partes.push(`Y ${proximos.length - 5} más adelante.`)
+    }
+    return partes.join(' ')
+  }, [mias, propias, cotizaciones])
+
+  // --- Cotizaciones pendientes y aprobadas ---
+  const textoCotizaciones = useCallback(() => {
+    const hoy = hoyStr()
     const pend = cotizaciones.filter((c) => c.estado === 'Pendiente')
     const aprob = cotizaciones.filter((c) => c.estado === 'Aprobado')
     const seg = pend.filter((c) => c.fecha_envio && diasEntre(soloFecha(c.fecha_envio), hoy) >= 7).length
+    const partes = []
 
     if (pend.length) {
       const valor = pend.reduce((a, c) => a + (Number(c.valor_total) || 0), 0)
@@ -181,7 +220,42 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
       partes.push('Todavía no hay cotizaciones aprobadas.')
     }
     return partes.join(' ')
-  }, [mias, propias, cotizaciones, nombre])
+  }, [cotizaciones])
+
+  const resumen = useCallback(
+    () => [`${saludo()}, ${(nombre || '').split(' ')[0] || 'bienvenido'}.`, textoAgenda(), textoCotizaciones()].join(' '),
+    [nombre, textoAgenda, textoCotizaciones]
+  )
+
+  // --- Últimos 5 clientes creados (se consulta en el momento, siempre con datos frescos) ---
+  const ultimosClientes = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('clientes_prospeccion')
+      .select('empresa, nombre_contacto, created_at')
+      .order('created_at', { ascending: false })
+      .limit(200)
+    if (error) { hablar('No pude consultar la base de datos de clientes en este momento.'); return }
+
+    // Una empresa puede tener varios contactos: se cuenta una sola vez
+    const vistos = new Set()
+    const clientes = []
+    for (const c of data || []) {
+      const k = sinTildes(c.empresa).trim()
+      if (!k || vistos.has(k)) continue
+      vistos.add(k)
+      clientes.push(c)
+      if (clientes.length === 5) break
+    }
+    if (!clientes.length) { hablar('Aún no hay clientes registrados en la base de datos.'); return }
+
+    const partes = [`Los últimos ${clientes.length === 1 ? 'cliente creado es' : `${clientes.length} clientes creados son`}.`]
+    clientes.forEach((c, i) => {
+      const quien = c.nombre_contacto ? `, atiende ${c.nombre_contacto}` : ''
+      const cuando = registroHablado(c.created_at)
+      partes.push(`${ORDINALES[i]}, ${c.empresa}${quien}${cuando ? `, registrado el ${cuando}` : ''}.`)
+    })
+    hablar(partes.join(' '))
+  }, [hablar])
 
   // Resumen automático una vez al día (cuando la voz está activa y ya cargaron los datos)
   useEffect(() => {
@@ -227,11 +301,36 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
     else window.speechSynthesis?.cancel()
   }
 
+  // Preguntar con la voz: "últimos clientes", "cotizaciones", "pendientes / mañana", "resumen"
+  const responder = useCallback((frase) => {
+    const t = sinTildes(frase)
+    if (/cliente/.test(t)) ultimosClientes()
+    else if (/cotiza|aprobad/.test(t)) hablar(textoCotizaciones())
+    else if (/manana|proxim|pendiente|alerta|agenda|hoy/.test(t)) hablar(textoAgenda())
+    else hablar(resumen())
+  }, [ultimosClientes, hablar, textoCotizaciones, textoAgenda, resumen])
+
+  const preguntar = () => {
+    if (!Reconocimiento) return
+    window.speechSynthesis.cancel() // para que no se escuche a sí mismo
+    const r = new Reconocimiento()
+    r.lang = 'es-CO'
+    r.interimResults = false
+    r.maxAlternatives = 1
+    r.onresult = (e) => { const f = e.results[0][0].transcript; setOido(f); responder(f) }
+    r.onerror = (e) => { setOido(e.error === 'not-allowed' ? 'Permite el uso del micrófono en el navegador.' : 'No te escuché, intenta de nuevo.') }
+    r.onend = () => setEscuchando(false)
+    setOido('')
+    setEscuchando(true)
+    try { r.start() } catch { setEscuchando(false) }
+  }
+
   if (!hayVoz) {
     return <p className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-xs text-slate-400">Tu navegador no admite voz. Usa Chrome, Edge o Safari actualizados.</p>
   }
 
   const select = 'rounded-lg border border-white/10 bg-[#0b1026]/70 px-2 py-1.5 text-xs text-white outline-none'
+  const boton = 'rounded-lg border border-white/15 px-3 py-1.5 text-xs text-slate-100 hover:bg-white/10'
   const tieneHorarios = mias().some((a) => rangosDe(a).length)
 
   return (
@@ -241,9 +340,17 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
         className={`rounded-lg px-3 py-1.5 text-xs font-medium ${activa ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-violet-600 text-white hover:bg-violet-500'}`}>
         {activa ? 'Activa · silenciar' : 'Activar voz'}
       </button>
-      <button onClick={() => hablar(resumen())} className="rounded-lg border border-white/15 px-3 py-1.5 text-xs text-slate-100 hover:bg-white/10">
-        Resumen del día
-      </button>
+      <button onClick={() => hablar(resumen())} className={boton}>Resumen del día</button>
+      <button onClick={() => hablar(textoAgenda())} className={boton}>Pendientes</button>
+      <button onClick={() => hablar(textoCotizaciones())} className={boton}>Cotizaciones</button>
+      <button onClick={ultimosClientes} className={boton}>Últimos 5 clientes</button>
+      {Reconocimiento && (
+        <button onClick={preguntar} disabled={escuchando}
+          className={`rounded-lg px-3 py-1.5 text-xs font-medium text-white ${escuchando ? 'bg-red-600' : 'bg-blue-600 hover:bg-blue-500'}`}>
+          {escuchando ? '🎤 Te escucho…' : '🎤 Preguntar'}
+        </button>
+      )}
+      <button onClick={() => window.speechSynthesis.cancel()} className={boton}>Callar</button>
       {!!voces.length && (
         <select value={vozNombre} onChange={(e) => { setVozNombre(e.target.value); guardar('pyc_voz_nombre', e.target.value) }} className={select} aria-label="Voz">
           <option value="">Automática · mejor voz latina femenina</option>
@@ -253,10 +360,11 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
       <select value={velocidad} onChange={(e) => { setVelocidad(Number(e.target.value)); guardar('pyc_voz_vel', e.target.value) }} className={select} aria-label="Velocidad">
         <option value={0.85}>Lenta</option><option value={1}>Normal</option><option value={1.2}>Rápida</option>
       </select>
-      <span className="text-xs text-slate-400">
+      <span className="w-full text-xs text-slate-400">
         {activa
           ? tieneHorarios ? 'Te avisará al empezar el rango de hora de cada alerta tuya (con la pestaña abierta).' : 'Crea alertas con rango de hora para que te avise a esa hora.'
           : 'Actívala para escuchar el resumen del día y los recordatorios.'}
+        {Reconocimiento && ' Con «Preguntar» di, por ejemplo: «últimos clientes», «cotizaciones», «pendientes» o «resumen».'}
       </span>
       {vozActual && <span className="w-full text-xs text-slate-400">Voz en uso: {vozActual.name} ({etiquetaLang(vozActual.lang)})</span>}
       {!!voces.length && !vozFemeninaLatina && (
@@ -264,7 +372,8 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
           Este navegador no tiene una voz latina femenina natural. Para la mejor calidad abre PYC Comercial en Microsoft Edge (voces «Microsoft Salome», Colombia, o «Dalia», México) o en Chrome en Windows/Mac.
         </span>
       )}
-      {ultimo && <span className="w-full truncate text-xs text-slate-500" title={ultimo}>Último mensaje: {ultimo}</span>}
+      {oido && <span className="w-full text-xs text-sky-300">Escuché: «{oido}»</span>}
+      {ultimo && <span className="w-full text-xs text-slate-500">Último mensaje: {ultimo}</span>}
     </div>
   )
 }
