@@ -172,6 +172,11 @@ alter table clientes_prospeccion
   add column if not exists fiesta text,            -- Fiesta / Fechas Especiales
   add column if not exists detalle text,           -- profesión o evento (opcional)
   add column if not exists direccion text,         -- dirección del cliente / contacto (opcional)
+  add column if not exists correo2 text,           -- segundo correo del contacto (opcional)
+  add column if not exists observaciones text,     -- notas libres del contacto
+  add column if not exists fecha_especial date,    -- fecha en que suele comprar (programa una alarma en Agenda)
+  add column if not exists aviso_dias int default 7, -- días de anticipación de la alarma
+  add column if not exists alerta_id uuid,         -- alerta de Agenda creada a partir de la fecha especial
   add column if not exists usuario_id uuid,
   add column if not exists usuario_email text;
 
