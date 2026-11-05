@@ -84,7 +84,7 @@ export default function Historial({ registroId, refresh }) {
                 <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-xs text-violet-300">{l.modulo || '—'}</span>
                 <span className="font-medium text-white">{l.usuario_nombre || l.usuario_email || 'sistema'}</span>
                 {l.usuario_nombre && l.usuario_email && <span className="text-xs text-slate-500">{l.usuario_email}</span>}
-                <span className="ml-auto text-xs text-slate-400">{new Date(l.fecha_hora).toLocaleString('es-CO')}</span>
+                <span className="ml-auto text-xs text-slate-400">{new Date(l.fecha_hora).toLocaleString('es-CO', { timeZone: 'America/Bogota', dateStyle: 'medium', timeStyle: 'medium' })}</span>
               </div>
               {l.detalle && <p className="mt-1 text-sm text-slate-300">{l.detalle}</p>}
 
