@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { supabase } from '../supabaseClient'
 import { MESES, fmtFecha, mesNumero, soloFecha } from '../lib/fechas'
+import { descargarIcs, enlaceGoogleCalendar } from '../lib/googleCalendar'
 
 // La auditoría (crear / editar / eliminar) la registra la base de datos automáticamente con triggers.
 const MAX_ITEMS = 50
@@ -148,6 +149,20 @@ export default function CotizacionForm({ registro, borrador, user, onClose, onSa
     if (k === 'estado' && v === 'Aprobado' && !entregaManual && !p.fecha_entrega && p.fecha_op) n.fecha_entrega = entregaEstimada(p.fecha_op)
     return n
   })
+
+  // Agrega la entrega al calendario desde el formulario (enlace directo a Google Calendar o archivo .ics)
+  // Botones «Google Calendar» y «.ics» para cualquier casilla de fecha (como en la sección de Alertas)
+  const botonesCalendario = (fecha, titulo, tipo = 'manual') => {
+    if (!fecha || !FECHA_OK.test(fecha)) return null
+    const ev = { id: `${f.n_cotizacion || 'nueva'}-${titulo}`, titulo, cliente: f.cliente, n_cotizacion: f.n_cotizacion, tipo, fecha_limite: fecha }
+    return (
+      <p className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+        <a href={enlaceGoogleCalendar(ev)} target="_blank" rel="noreferrer"
+          className="rounded-md bg-sky-600 px-2 py-1 font-medium text-white hover:bg-sky-500">📅 Google Calendar</a>
+        <button type="button" onClick={() => descargarIcs(ev)} className="rounded-md bg-white/10 px-2 py-1 text-slate-200 hover:bg-white/20">.ics</button>
+      </p>
+    )
+  }
 
   const recalcularEntrega = () => { setEntregaManual(false); setF((p) => ({ ...p, fecha_entrega: entregaEstimada(p.fecha_op) })) }
 
@@ -311,6 +326,7 @@ export default function CotizacionForm({ registro, borrador, user, onClose, onSa
     <div>
       <label className={label}>{titulo}</label>
       <input type={type} value={f[k] ?? ''} onChange={(e) => set(k, e.target.value)} className={input} {...extra} />
+      {type === 'date' && botonesCalendario(f[k], `${titulo}${f.cliente ? ` - ${f.cliente}` : ''}`)}
     </div>
   )
 
@@ -446,11 +462,13 @@ export default function CotizacionForm({ registro, borrador, user, onClose, onSa
                 Se calcula con la Fecha OP + {DIAS_ENTREGA} días hábiles (sin festivos).{' '}
                 {entregaManual && f.fecha_op && <button type="button" onClick={recalcularEntrega} className="text-blue-300 hover:underline">Recalcular</button>}
               </p>
+              {botonesCalendario(f.fecha_entrega, 'Entrega de pedido', 'entrega')}
             </div>
             <div>
               <label className={label}>Fecha anticipada de entrega (opcional)</label>
               <input type="date" value={f.fecha_entrega_anticipada} onChange={(e) => set('fecha_entrega_anticipada', e.target.value)} className={input} />
-              <p className="mt-1 text-xs text-slate-500">Debe ser igual o anterior a la fecha de entrega. Ambas fechas se agendan solas como alertas y en el calendario.</p>
+              <p className="mt-1 text-xs text-slate-500">Debe ser igual o anterior a la fecha de entrega. Ambas fechas se agendan solas como alertas al guardar la cotización aprobada.</p>
+              {botonesCalendario(f.fecha_entrega_anticipada, 'Entrega anticipada de pedido', 'entrega_anticipada')}
             </div>
             <div>
               <label className="flex cursor-pointer items-center gap-2 pt-6 text-sm text-slate-200">
