@@ -35,11 +35,12 @@ alter table cotizaciones
   add column if not exists tipo_marcacion text,
   add column if not exists precio_marcacion numeric,
   add column if not exists fecha_entrega date,
+  add column if not exists fecha_entrega_anticipada date, -- fecha anticipada de entrega (opcional)
   add column if not exists valor_positivos numeric,
   add column if not exists dtf boolean default false,
   add column if not exists dtf_metros numeric,
   add column if not exists fletes jsonb default '[]'::jsonb,              -- [{descripcion,precio}] (máx. 5)
-  add column if not exists gastos_adicionales jsonb default '[]'::jsonb,  -- [{descripcion,valor}] (máx. 10)
+  add column if not exists gastos_adicionales jsonb default '[]'::jsonb,  -- [{descripcion,cantidad,valor_unitario,valor}] (máx. 10); valor = cantidad x valor_unitario
   add column if not exists usuario_id uuid,               -- dueño (vendedor) de la cotización
   add column if not exists usuario_email text;
 
@@ -114,7 +115,7 @@ do $$
 declare r record; actual text;
 begin
   for r in select * from (values
-      ('fecha_envio','date'), ('fecha_op','date'), ('fecha_facturacion','date'), ('fecha_entrega','date'),
+      ('fecha_envio','date'), ('fecha_op','date'), ('fecha_facturacion','date'), ('fecha_entrega','date'), ('fecha_entrega_anticipada','date'),
       ('valor_aprobado','numeric'), ('precio_marcacion','numeric'), ('valor_positivos','numeric'), ('dtf_metros','numeric'),
       ('num_op','text'), ('n_factura','text')
     ) v(col, tipo)
@@ -144,8 +145,10 @@ alter table alertas
   add column if not exists fecha_limite date,
   add column if not exists estado text default 'Pendiente',
   add column if not exists cliente text,                 -- empresa cliente asociada
-  add column if not exists cotizacion_id uuid,
+  add column if not exists cotizacion_id text,           -- id de la cotización (texto: sirve con ids uuid o numéricos)
   add column if not exists n_cotizacion text,
+  add column if not exists tipo text default 'manual',   -- manual | entrega | entrega_anticipada | fecha_especial (las 3 últimas las genera el sistema)
+  add column if not exists gcal_stale boolean default false, -- true si cambió después de sincronizarse con Google Calendar
   add column if not exists usuario_id uuid,              -- quién la creó
   add column if not exists usuario_email text,
   add column if not exists usuario_nombre text,
@@ -176,7 +179,7 @@ alter table clientes_prospeccion
   add column if not exists observaciones text,     -- notas libres del contacto
   add column if not exists fecha_especial date,    -- fecha en que suele comprar (programa una alarma en Agenda)
   add column if not exists aviso_dias int default 7, -- días de anticipación de la alarma
-  add column if not exists alerta_id uuid,         -- alerta de Agenda creada a partir de la fecha especial
+  add column if not exists alerta_id text,         -- alerta de Agenda creada a partir de la fecha especial
   add column if not exists usuario_id uuid,
   add column if not exists usuario_email text;
 
@@ -195,10 +198,33 @@ alter table auditoria_logs
   add column if not exists usuario_nombre text,
   add column if not exists accion text,        -- CREAR | EDITAR | ELIMINAR | EXPORTAR
   add column if not exists modulo text,        -- Cotizaciones | Base de Datos | Alertas | Usuarios
-  add column if not exists registro_id uuid,
+  add column if not exists registro_id text,   -- id del registro (texto: sirve con ids uuid o numéricos)
   add column if not exists detalle text,
   add column if not exists cambios jsonb,
-  add column if not exists cotizacion_id uuid;  -- cotización a la que pertenece el movimiento (alertas incluidas)
+  add column if not exists cotizacion_id text;  -- cotización a la que pertenece el movimiento (alertas incluidas)
+
+-- 4.1) CORRECCIÓN "invalid input syntax for type uuid: '4'": si las tablas existían de antes con ids numéricos
+-- (p. ej. cotizaciones.id = 4), las columnas que guardan esos ids no pueden ser uuid. Se pasan a texto,
+-- que sirve con cualquier tipo de id. Es seguro repetirlo: solo convierte lo que aún no es texto.
+do $$
+declare r record;
+begin
+  for r in select * from (values
+      ('alertas', 'cotizacion_id'), ('auditoria_logs', 'registro_id'),
+      ('auditoria_logs', 'cotizacion_id'), ('clientes_prospeccion', 'alerta_id')
+    ) v(t, c)
+  loop
+    if exists (select 1 from information_schema.columns
+                where table_schema = 'public' and table_name = r.t and column_name = r.c and data_type <> 'text') then
+      begin
+        execute format('alter table public.%I alter column %I type text using %I::text', r.t, r.c, r.c);
+        raise notice 'Columna %.% convertida a texto', r.t, r.c;
+      exception when others then
+        raise warning 'No se pudo convertir %.% a texto: % (revisa si alguna vista o política depende de esa columna)', r.t, r.c, sqlerrm;
+      end;
+    end if;
+  end loop;
+end $$;
 
 create index if not exists auditoria_logs_fecha_idx on auditoria_logs (fecha_hora desc);
 create index if not exists auditoria_logs_registro_idx on auditoria_logs (registro_id);
@@ -345,8 +371,8 @@ declare
   v_old jsonb;
   v_new jsonb;
   v_ref jsonb;
-  v_id uuid;
-  v_cot uuid;
+  v_id text;   -- texto: el id de la tabla puede ser uuid o numérico, y nunca se convierte
+  v_cot text;
   v_cambios jsonb;
   v_detalle text;
   v_resumen text;
@@ -355,14 +381,15 @@ begin
 
   if tg_op = 'INSERT' then
     v_accion := 'CREAR';
-    v_new := to_jsonb(new); v_ref := v_new; v_cambios := v_new; v_id := (v_new ->> 'id')::uuid;
+    v_new := to_jsonb(new); v_ref := v_new; v_cambios := v_new; v_id := v_new ->> 'id';
   elsif tg_op = 'UPDATE' then
     v_accion := 'EDITAR';
-    v_old := to_jsonb(old); v_new := to_jsonb(new); v_ref := v_new; v_id := (v_new ->> 'id')::uuid;
+    v_old := to_jsonb(old); v_new := to_jsonb(new); v_ref := v_new; v_id := v_new ->> 'id';
     select coalesce(jsonb_object_agg(n.key, jsonb_build_object('antes', v_old -> n.key, 'despues', n.value)), '{}'::jsonb)
       into v_cambios
       from jsonb_each(v_new) n
-     where n.key <> 'created_at' and (v_old -> n.key) is distinct from n.value;
+     -- gcal_*: marcas técnicas de la sincronización con Google Calendar, no son un movimiento del usuario
+     where n.key not in ('created_at', 'gcal_event_id', 'gcal_stale') and (v_old -> n.key) is distinct from n.value;
     if v_cambios = '{}'::jsonb then return null; end if;   -- no cambió nada: no se registra
     select string_agg(
              case when c.key = 'estado'
@@ -372,11 +399,11 @@ begin
       from jsonb_each(v_cambios) c;
   else
     v_accion := 'ELIMINAR';
-    v_old := to_jsonb(old); v_ref := v_old; v_cambios := v_old; v_id := (v_old ->> 'id')::uuid;
+    v_old := to_jsonb(old); v_ref := v_old; v_cambios := v_old; v_id := v_old ->> 'id';
   end if;
 
   -- Las alertas quedan ligadas a su cotización para verlas en el historial de esa cotización
-  v_cot := case when tg_table_name = 'cotizaciones' then v_id else nullif(v_ref ->> 'cotizacion_id', '')::uuid end;
+  v_cot := case when tg_table_name = 'cotizaciones' then v_id else nullif(v_ref ->> 'cotizacion_id', '') end;
 
   v_detalle := concat_ws(' · ', v_ref ->> 'n_cotizacion', v_ref ->> 'cliente', v_ref ->> 'titulo',
                          v_ref ->> 'empresa', v_ref ->> 'nombre_contacto', v_ref ->> 'email');
@@ -420,6 +447,89 @@ create trigger trg_audit_alertas after insert or update or delete on alertas
 drop trigger if exists trg_audit_perfiles on perfiles;
 create trigger trg_audit_perfiles after insert or update or delete on perfiles
   for each row execute function public.log_auditoria('Usuarios');
+
+-- La bitácora es solo de lectura para la app: nadie puede insertar, editar ni borrar movimientos (solo los triggers)
+revoke insert, update, delete, truncate on public.auditoria_logs from anon, authenticated;
+
+-- 8.1) ALERTAS DE ENTREGA AUTOMÁTICAS ------------------------------
+-- Cuando una cotización está Aprobada, su "Fecha de entrega" y su "Fecha anticipada de entrega" se convierten solas
+-- en alertas de la Agenda (tipo 'entrega' y 'entrega_anticipada'). Si la fecha cambia, la alerta se mueve; si se borra la
+-- fecha, la cotización deja de estar Aprobada o se elimina, la alerta desaparece. Todo queda en la auditoría.
+create or replace function public.sync_alertas_entrega()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_cot text;
+  v_nombre text;
+  r record;
+begin
+  if tg_op = 'DELETE' then
+    delete from public.alertas where cotizacion_id = old.id::text and tipo in ('entrega', 'entrega_anticipada');
+    return null;
+  end if;
+
+  v_cot := new.id::text;
+  select nombre into v_nombre from public.perfiles where id = coalesce(new.usuario_id, auth.uid());
+
+  for r in
+    select * from (values
+      ('entrega', 'Entrega de pedido', case when new.estado = 'Aprobado' then new.fecha_entrega end),
+      ('entrega_anticipada', 'Entrega anticipada de pedido', case when new.estado = 'Aprobado' then new.fecha_entrega_anticipada end)
+    ) v(tipo, titulo, fecha)
+  loop
+    if r.fecha is null then
+      delete from public.alertas where cotizacion_id = v_cot and tipo = r.tipo;
+    elsif exists (select 1 from public.alertas where cotizacion_id = v_cot and tipo = r.tipo) then
+      update public.alertas
+         set estado = case when fecha_limite is distinct from r.fecha then 'Pendiente' else estado end,
+             titulo = r.titulo,
+             fecha_limite = r.fecha,
+             cliente = new.cliente,
+             n_cotizacion = new.n_cotizacion
+       where cotizacion_id = v_cot and tipo = r.tipo
+         and (fecha_limite is distinct from r.fecha or titulo is distinct from r.titulo
+              or cliente is distinct from new.cliente or n_cotizacion is distinct from new.n_cotizacion);
+    else
+      insert into public.alertas (titulo, fecha_limite, estado, cliente, cotizacion_id, n_cotizacion, tipo,
+                                  usuario_id, usuario_email, usuario_nombre)
+      values (r.titulo, r.fecha, 'Pendiente', new.cliente, v_cot, new.n_cotizacion, r.tipo,
+              coalesce(new.usuario_id, auth.uid()), coalesce(new.usuario_email, auth.jwt() ->> 'email'), v_nombre);
+    end if;
+  end loop;
+  return null;
+end $$;
+
+drop trigger if exists trg_sync_entregas on cotizaciones;
+create trigger trg_sync_entregas after insert or update or delete on cotizaciones
+  for each row execute function public.sync_alertas_entrega();
+
+-- Si una alerta ya sincronizada con Google Calendar cambia de fecha, hora, título o cliente, se marca para
+-- que la app actualice el evento en el calendario (borra el viejo y crea el nuevo).
+create or replace function public.alertas_marca_gcal()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.gcal_event_id is not null
+     and new.gcal_event_id is not distinct from old.gcal_event_id
+     and (new.titulo is distinct from old.titulo or new.fecha_limite is distinct from old.fecha_limite
+          or new.hora_inicio is distinct from old.hora_inicio or new.hora_fin is distinct from old.hora_fin
+          or new.hora_inicio2 is distinct from old.hora_inicio2 or new.hora_fin2 is distinct from old.hora_fin2
+          or new.cliente is distinct from old.cliente) then
+    new.gcal_stale := true;
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists trg_alertas_gcal on alertas;
+create trigger trg_alertas_gcal before update on alertas
+  for each row execute function public.alertas_marca_gcal();
+
+-- Genera las alertas de entrega de las cotizaciones aprobadas que ya existían
+update public.cotizaciones set estado = estado where estado = 'Aprobado';
 
 -- 9) SEGURIDAD (RLS) ---------------------------------------------
 alter table perfiles enable row level security;
