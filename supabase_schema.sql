@@ -159,7 +159,11 @@ alter table alertas
   add column if not exists hora_fin2 text;
 
 alter table alertas alter column usuario_id set default auth.uid();
+-- Si la tabla ya existía de antes, puede no tener la columna created_at: se agrega antes de usarla
+alter table alertas add column if not exists created_at timestamptz default now();
 alter table alertas alter column created_at set default now();
+
+alter table cotizaciones add column if not exists created_at timestamptz default now();
 
 -- 3) BASE DE DATOS / PROSPECCIÓN COMERCIAL -----------------------
 create table if not exists clientes_prospeccion (
@@ -183,6 +187,7 @@ alter table clientes_prospeccion
   add column if not exists usuario_id uuid,
   add column if not exists usuario_email text;
 
+alter table clientes_prospeccion add column if not exists created_at timestamptz default now();
 alter table clientes_prospeccion alter column usuario_id set default auth.uid();
 alter table clientes_prospeccion alter column correo drop not null;   -- el correo es opcional
 
@@ -193,6 +198,7 @@ create table if not exists auditoria_logs (
 );
 
 alter table auditoria_logs
+  add column if not exists fecha_hora timestamptz not null default now(),
   add column if not exists usuario_id uuid,
   add column if not exists usuario_email text,
   add column if not exists usuario_nombre text,
@@ -226,6 +232,32 @@ begin
   end loop;
 end $$;
 
+-- 4.2) CORRECCIÓN "operator does not exist: text = uuid": si en tu base antigua usuario_id está guardado como texto,
+-- no se puede comparar con auth.uid() (uuid). Se pasa a uuid (los valores que no sean un uuid válido quedan vacíos).
+-- Antes se eliminan las políticas de seguridad de estas tablas porque bloquean el cambio de tipo; más abajo se recrean todas.
+do $$
+declare r record; t text;
+begin
+  foreach t in array array['cotizaciones', 'alertas', 'clientes_prospeccion', 'auditoria_logs']
+  loop
+    if to_regclass('public.' || t) is null then continue; end if;
+    for r in select policyname from pg_policies where schemaname = 'public' and tablename = t loop
+      execute format('drop policy if exists %I on public.%I', r.policyname, t);
+    end loop;
+    if exists (select 1 from information_schema.columns
+                where table_schema = 'public' and table_name = t and column_name = 'usuario_id' and data_type <> 'uuid') then
+      begin
+        execute format($f$alter table public.%I alter column usuario_id drop default$f$, t);
+        execute format($f$alter table public.%I alter column usuario_id type uuid
+                          using (case when usuario_id::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then usuario_id::text::uuid end)$f$, t);
+        raise notice 'Columna %.usuario_id convertida a uuid', t;
+      exception when others then
+        raise warning 'No se pudo convertir %.usuario_id a uuid: %', t, sqlerrm;
+      end;
+    end if;
+  end loop;
+end $$;
+
 create index if not exists auditoria_logs_fecha_idx on auditoria_logs (fecha_hora desc);
 create index if not exists auditoria_logs_registro_idx on auditoria_logs (registro_id);
 create index if not exists auditoria_logs_cotizacion_idx on auditoria_logs (cotizacion_id);
@@ -248,6 +280,11 @@ create table if not exists perfiles (
 );
 
 alter table perfiles add column if not exists nombre text;
+alter table perfiles add column if not exists email text;
+alter table perfiles add column if not exists rol text not null default 'sin_acceso';
+alter table perfiles add column if not exists activo boolean not null default true;
+alter table perfiles add column if not exists permisos jsonb not null default '{}'::jsonb;
+alter table perfiles add column if not exists created_at timestamptz default now();
 
 -- Migra los roles de versiones anteriores
 alter table perfiles drop constraint if exists perfiles_rol_check;
