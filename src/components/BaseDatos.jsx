@@ -151,12 +151,13 @@ export default function BaseDatos({ user, perfil }) {
       .insert({
         ...datosAlerta(filas, empresa, avisoDias),
         estado: 'Pendiente',
+        tipo: 'fecha_especial',
         usuario_email: user.email,
         usuario_nombre: perfil.nombre || user.email,
       })
       .select('id')
       .single()
-    return error ? { error: error.message } : { id: data.id }
+    return error ? { error: error.message } : { id: String(data.id) }
   }
 
   const borrarAlerta = (id) => supabase.from('alertas').delete().eq('id', id)
