@@ -13,7 +13,9 @@ const TIPOS_FLETE = ['Transporte terrestre nacional', 'Mensajería urbana', 'Fle
 
 const itemVacio = () => ({ producto: '', color: '', cantidad: 1, valor_unitario: '' })
 const fleteVacio = () => ({ tipo: TIPOS_FLETE[0], otro: '', precio: '' })
-const gastoVacio = () => ({ descripcion: '', valor: '' })
+const gastoVacio = () => ({ descripcion: '', cantidad: 1, valor_unitario: '' })
+// Total del renglón de otros gastos = cantidad x valor unitario (se calcula solo)
+const totalGasto = (g) => redondea((parseNum(g.cantidad) || 0) * (parseNum(g.valor_unitario) || 0))
 
 const input = 'w-full rounded-lg border border-white/10 bg-[#0b1026]/70 px-3 py-2 text-sm text-white outline-none focus:border-blue-500 disabled:opacity-50'
 const label = 'mb-1 block text-xs text-slate-400'
@@ -91,7 +93,8 @@ const fletesIniciales = (registro) =>
 
 const gastosIniciales = (registro) =>
   (Array.isArray(registro?.gastos_adicionales) ? registro.gastos_adicionales : []).slice(0, MAX_GASTOS)
-    .map((g) => ({ descripcion: g.descripcion ?? '', valor: g.valor ?? '' }))
+    // Los gastos guardados antes solo tenían "valor": se leen como cantidad 1 x ese valor
+    .map((g) => ({ descripcion: g.descripcion ?? '', cantidad: g.cantidad ?? 1, valor_unitario: g.valor_unitario ?? g.valor ?? '' }))
 
 // Estado inicial del formulario. Las fechas se limpian a AAAA-MM-DD (así el campo de fecha siempre las muestra)
 // y los números y textos nulos pasan a '' para que ningún campo quede "roto" al editar.
@@ -104,7 +107,8 @@ function formInicial(r) {
     fecha_op: soloFecha(r?.fecha_op), num_op: t(r?.num_op), valor_aprobado: t(r?.valor_aprobado),
     rentabilidad_pct: t(r?.rentabilidad_pct), n_factura: t(r?.n_factura), fecha_facturacion: soloFecha(r?.fecha_facturacion),
     tipo_marcacion: t(r?.tipo_marcacion), precio_marcacion: t(r?.precio_marcacion),
-    fecha_entrega: soloFecha(r?.fecha_entrega), valor_positivos: t(r?.valor_positivos),
+    fecha_entrega: soloFecha(r?.fecha_entrega), fecha_entrega_anticipada: soloFecha(r?.fecha_entrega_anticipada),
+    valor_positivos: t(r?.valor_positivos),
     dtf: r?.dtf === true, dtf_metros: t(r?.dtf_metros),
   }
 }
@@ -132,7 +136,7 @@ export default function CotizacionForm({ registro, borrador, user, onClose, onSa
   const total = items.reduce((a, i) => a + totalItem(i), 0)
   const cantidadTotal = items.reduce((a, i) => a + (Number(i.cantidad) || 0), 0)
   const totalFletes = fletes.reduce((a, x) => a + (parseNum(x.precio) || 0), 0)
-  const totalGastos = gastos.reduce((a, x) => a + (parseNum(x.valor) || 0), 0)
+  const totalGastos = gastos.reduce((a, x) => a + totalGasto(x), 0)
 
   const set = (k, v) => setF((p) => {
     const n = { ...p, [k]: v }
@@ -235,6 +239,11 @@ export default function CotizacionForm({ registro, borrador, user, onClose, onSa
     // --- Campos de órdenes aprobadas (solo se envían con estado Aprobado; si no, se respetan los guardados) ---
     if (aprobado) {
       if (f.fecha_entrega && !FECHA_OK.test(f.fecha_entrega)) { setError('Fecha de entrega: la fecha no es válida.'); return }
+      if (f.fecha_entrega_anticipada && !FECHA_OK.test(f.fecha_entrega_anticipada)) { setError('Fecha anticipada de entrega: la fecha no es válida.'); return }
+      if (f.fecha_entrega_anticipada && f.fecha_entrega && f.fecha_entrega_anticipada > f.fecha_entrega) {
+        setError('La fecha anticipada de entrega debe ser igual o anterior a la fecha de entrega.')
+        return
+      }
       const precioMarc = parseNum(f.precio_marcacion)
       const positivos = parseNum(f.valor_positivos)
       const metros = f.dtf ? parseNum(f.dtf_metros) : null
@@ -254,15 +263,21 @@ export default function CotizacionForm({ registro, borrador, user, onClose, onSa
       const gastosFinal = []
       for (let i = 0; i < gastos.length; i += 1) {
         const x = gastos[i]
-        const valor = parseNum(x.valor)
-        if (!x.descripcion.trim() || valor === null || Number.isNaN(valor) || valor < 0) { setError(`Gasto adicional ${i + 1}: completa la descripción y un valor válido.`); return }
-        gastosFinal.push({ descripcion: x.descripcion.trim(), valor })
+        const cantidad = parseNum(x.cantidad)
+        const valorUnitario = parseNum(x.valor_unitario)
+        if (!x.descripcion.trim() || !(cantidad > 0) || valorUnitario === null || Number.isNaN(valorUnitario) || valorUnitario < 0) {
+          setError(`Gasto adicional ${i + 1}: completa la descripción, una cantidad mayor a 0 y un valor unitario válido.`)
+          return
+        }
+        // "valor" queda como el total del renglón (cantidad x valor unitario) para que los reportes sigan funcionando
+        gastosFinal.push({ descripcion: x.descripcion.trim(), cantidad, valor_unitario: valorUnitario, valor: redondea(cantidad * valorUnitario) })
       }
 
       Object.assign(payload, {
         tipo_marcacion: texto(f.tipo_marcacion),
         precio_marcacion: precioMarc,
         fecha_entrega: f.fecha_entrega || null,
+        fecha_entrega_anticipada: f.fecha_entrega_anticipada || null,
         valor_positivos: positivos,
         dtf: f.dtf,
         dtf_metros: metros,
@@ -433,6 +448,11 @@ export default function CotizacionForm({ registro, borrador, user, onClose, onSa
               </p>
             </div>
             <div>
+              <label className={label}>Fecha anticipada de entrega (opcional)</label>
+              <input type="date" value={f.fecha_entrega_anticipada} onChange={(e) => set('fecha_entrega_anticipada', e.target.value)} className={input} />
+              <p className="mt-1 text-xs text-slate-500">Debe ser igual o anterior a la fecha de entrega. Ambas fechas se agendan solas como alertas y en el calendario.</p>
+            </div>
+            <div>
               <label className="flex cursor-pointer items-center gap-2 pt-6 text-sm text-slate-200">
                 <input type="checkbox" checked={f.dtf} onChange={(e) => set('dtf', e.target.checked)} /> Incluye DTF
               </label>
@@ -495,14 +515,22 @@ export default function CotizacionForm({ registro, borrador, user, onClose, onSa
             </div>
             <div className="space-y-2">
               {gastos.map((x, i) => (
-                <div key={i} className="grid grid-cols-1 gap-3 rounded-lg border border-white/10 bg-[#0b1026]/40 p-3 sm:grid-cols-3">
-                  <div className="sm:col-span-2">
+                <div key={i} className="grid grid-cols-1 gap-3 rounded-lg border border-white/10 bg-[#0b1026]/40 p-3 sm:grid-cols-12">
+                  <div className="sm:col-span-4">
                     <label className={label}>Gasto {i + 1}: descripción</label>
                     <input value={x.descripcion} onChange={(e) => setGasto(i, 'descripcion', e.target.value)} className={input} />
                   </div>
-                  <div>
-                    <label className={label}>Valor</label>
-                    <input type="text" inputMode="decimal" value={x.valor} onChange={(e) => setGasto(i, 'valor', e.target.value)} className={input} />
+                  <div className="sm:col-span-2">
+                    <label className={label}>Cantidad</label>
+                    <input type="text" inputMode="decimal" value={x.cantidad} onChange={(e) => setGasto(i, 'cantidad', e.target.value)} className={input} />
+                  </div>
+                  <div className="sm:col-span-3">
+                    <label className={label}>Valor unitario</label>
+                    <input type="text" inputMode="decimal" value={x.valor_unitario} onChange={(e) => setGasto(i, 'valor_unitario', e.target.value)} className={input} />
+                  </div>
+                  <div className="sm:col-span-3">
+                    <label className={label}>Valor total</label>
+                    <div className={`${input} bg-violet-500/10 font-semibold text-violet-300`}>{cop(totalGasto(x))}</div>
                   </div>
                 </div>
               ))}
