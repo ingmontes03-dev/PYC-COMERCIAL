@@ -10,6 +10,7 @@ import Cotizador from './Cotizador'
 import BaseDatos from './BaseDatos'
 import Historial from './Historial'
 import VozAlertas from './VozAlertas'
+import SyncCalendario from './SyncCalendario'
 import Usuarios from './Usuarios'
 
 const cop = (n) => (Number(n) || 0).toLocaleString('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 })
@@ -120,6 +121,7 @@ export default function Dashboard({ user, perfil }) {
     if (error) { setError(error.message); return }
     if (!data?.length) { setError('No tienes permiso para eliminar esta cotización.'); return }
     cargar()
+    refrescarAlertas() // sus alertas de entrega también se eliminan
   }
 
   const COLUMNAS_EXPORT = [
@@ -143,10 +145,11 @@ export default function Dashboard({ user, perfil }) {
     { k: 'tipo_marcacion', t: 'Tipo de marcación' },
     { k: 'precio_marcacion', t: 'Precio de marcación' },
     { k: 'fecha_entrega', t: 'Fecha de entrega', f: (c) => soloFecha(c.fecha_entrega) },
+    { k: 'fecha_entrega_anticipada', t: 'Fecha anticipada de entrega', f: (c) => soloFecha(c.fecha_entrega_anticipada) },
     { k: 'valor_positivos', t: 'Valor positivos' },
     { k: 'dtf', t: 'DTF', f: (c) => (c.dtf ? `Sí${c.dtf_metros ? ` (${c.dtf_metros} m)` : ''}` : 'No') },
     { k: 'fletes', t: 'Fletes', f: (c) => (c.fletes || []).map((x) => `${x.descripcion}: ${x.precio}`).join(' | ') },
-    { k: 'gastos_adicionales', t: 'Gastos adicionales', f: (c) => (c.gastos_adicionales || []).map((x) => `${x.descripcion}: ${x.valor}`).join(' | ') },
+    { k: 'gastos_adicionales', t: 'Gastos adicionales', f: (c) => (c.gastos_adicionales || []).map((x) => `${x.descripcion}: ${x.cantidad ?? 1} x ${x.valor_unitario ?? x.valor} = ${x.valor}`).join(' | ') },
     { k: 'usuario_email', t: 'Vendedor' },
   ]
 
@@ -197,6 +200,7 @@ export default function Dashboard({ user, perfil }) {
             {tiene(perfil, 'agenda') && (
               <>
                 <VozAlertas user={user} nombre={nombre} cotizaciones={cotizaciones} version={versionAlertas} />
+                <SyncCalendario user={user} version={versionAlertas} />
                 <PanelAlertas cotizaciones={cotizaciones} version={versionAlertas} onVencidas={onVencidas} onVerAgenda={verAgenda} />
               </>
             )}
@@ -242,13 +246,14 @@ export default function Dashboard({ user, perfil }) {
                       <th className={th}>N° Factura</th>
                       <th className={th}>Fecha fact.</th>
                       <th className={th}>Entrega</th>
+                      <th className={th}>Entrega anticip.</th>
                       <th className={th}>Registrada</th>
                       <th className={`${th} sticky right-0 z-20 bg-[#1b2150]`}>Acciones</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {cargando && <tr><td colSpan={20} className="p-6 text-center text-slate-400">Cargando…</td></tr>}
-                    {!cargando && !filtradas.length && <tr><td colSpan={20} className="p-6 text-center text-slate-400">No hay cotizaciones para mostrar.</td></tr>}
+                    {cargando && <tr><td colSpan={21} className="p-6 text-center text-slate-400">Cargando…</td></tr>}
+                    {!cargando && !filtradas.length && <tr><td colSpan={21} className="p-6 text-center text-slate-400">No hay cotizaciones para mostrar.</td></tr>}
                     {filtradas.map((c) => (
                       <tr key={c.id} className="group border-t border-white/5 hover:bg-white/[0.03]">
                         <td className={`${td} sticky left-0 z-10 w-[120px] min-w-[120px] bg-[#141a3d] font-semibold text-white`}>{c.n_cotizacion}</td>
@@ -269,6 +274,7 @@ export default function Dashboard({ user, perfil }) {
                         <td className={td}>{c.n_factura || '—'}</td>
                         <td className={td}>{soloFecha(c.fecha_facturacion) || '—'}</td>
                         <td className={td}>{soloFecha(c.fecha_entrega) || '—'}</td>
+                        <td className={td}>{soloFecha(c.fecha_entrega_anticipada) || '—'}</td>
                         <td className={`${td} text-xs text-slate-400`}>
                           {c.created_at ? new Date(c.created_at).toLocaleString('es-CO', { timeZone: 'America/Bogota', dateStyle: 'short', timeStyle: 'short' }) : '—'}
                         </td>
@@ -316,7 +322,7 @@ export default function Dashboard({ user, perfil }) {
           borrador={form.borrador}
           user={user}
           onClose={() => setForm(null)}
-          onSaved={() => { setForm(null); cargar() }}
+          onSaved={() => { setForm(null); cargar(); refrescarAlertas() }}
         />
       )}
 
