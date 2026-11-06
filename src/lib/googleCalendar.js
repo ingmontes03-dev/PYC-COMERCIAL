@@ -1,3 +1,4 @@
+import { supabase } from '../supabaseClient'
 import { fmtFecha, rangosDe, soloFecha } from './fechas'
 
 // Sincronización automática con la API de Google Calendar: solo se activa si defines
@@ -18,8 +19,11 @@ const compacta = (f, h) => `${sinGuiones(f)}T${h.replace(':', '')}00`
 
 const tituloEvento = (a) => `PYC: ${a.titulo || a.descripcion || 'Pendiente'}`
 
+const TIPO_TEXTO = { entrega: 'Entrega de pedido', entrega_anticipada: 'Entrega anticipada', fecha_especial: 'Fecha especial de compra' }
+
 const descripcionEvento = (a) =>
   [
+    TIPO_TEXTO[a.tipo] && `Tipo: ${TIPO_TEXTO[a.tipo]}`,
     a.cliente && `Cliente: ${a.cliente}`,
     a.n_cotizacion && `Cotización: ${a.n_cotizacion}`,
     (a.usuario_nombre || a.usuario_email) && `Responsable: ${a.usuario_nombre || a.usuario_email}`,
@@ -109,6 +113,15 @@ async function obtenerToken() {
   })
 }
 
+// ¿Hay una autorización de Google vigente en esta sesión? (el permiso dura ~1 hora y se pide con un clic)
+export const tokenVigente = () => Boolean(accessToken) && Date.now() < expira
+
+// Pide la autorización de Google. Debe llamarse desde un clic del usuario (si no, el navegador bloquea la ventana).
+export async function conectarGoogle() {
+  if (!apiDisponible) throw new Error('Falta configurar VITE_GOOGLE_CLIENT_ID')
+  return obtenerToken()
+}
+
 async function insertar(token, cuerpo) {
   const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
     method: 'POST',
@@ -145,4 +158,34 @@ export async function crearEventoGoogle(a) {
     }))
   }
   return ids.join(',')
+}
+
+// Borra del calendario los eventos de una alerta (ids separados por coma). Si ya no existen, no pasa nada.
+export async function borrarEventosGoogle(ids) {
+  if (!ids) return
+  const token = await obtenerToken()
+  for (const id of String(ids).split(',').map((x) => x.trim()).filter(Boolean)) {
+    const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!res.ok && res.status !== 404 && res.status !== 410) throw new Error(`Google Calendar respondió ${res.status}`)
+  }
+}
+
+// Pone una alerta en el calendario y guarda el id del evento. Si la alerta cambió desde la última vez
+// (gcal_stale), primero borra el evento viejo. Evita sincronizar la misma alerta dos veces a la vez.
+const enCurso = new Set()
+export async function sincronizarAlerta(a) {
+  if (enCurso.has(a.id)) return null
+  enCurso.add(a.id)
+  try {
+    if (a.gcal_event_id && a.gcal_stale) await borrarEventosGoogle(a.gcal_event_id)
+    const id = await crearEventoGoogle(a)
+    const { error } = await supabase.from('alertas').update({ gcal_event_id: id, gcal_stale: false }).eq('id', a.id)
+    if (error) throw new Error(error.message)
+    return id
+  } finally {
+    enCurso.delete(a.id)
+  }
 }
