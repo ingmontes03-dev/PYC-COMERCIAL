@@ -72,7 +72,10 @@ export default function Historial({ registroId, refresh }) {
 
       {error && <p className="m-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</p>}
       {cargando && <p className="p-4 text-sm text-slate-400">Cargando historial...</p>}
-      {!cargando && !error && !filtrados.length && <p className="p-4 text-sm text-slate-400">Aún no hay movimientos registrados.</p>}
+      {!cargando && !error && !filtrados.length && <p className="p-4 text-sm text-slate-400">
+          Aún no hay movimientos registrados. Si acabas de crear o editar algo y sigue vacío: (1) ejecuta completo <b>supabase_schema.sql</b> en Supabase (es lo que activa el registro automático),
+          y (2) confirma que tu usuario sea super admin o tenga el permiso «historial». Para comprobarlo, ejecuta <b>verificar_auditoria.sql</b>.
+        </p>}
 
       <ul className="divide-y divide-white/5">
         {filtrados.map((l) => {
