@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { supabase } from '../supabaseClient'
 import { MESES, fmtFecha, mesNumero, soloFecha } from '../lib/fechas'
 import { descargarIcs, enlaceGoogleCalendar } from '../lib/googleCalendar'
+import useEmpresas from '../lib/useEmpresas'
 
 // La auditoría (crear / editar / eliminar) la registra la base de datos automáticamente con triggers.
 const MAX_ITEMS = 50
@@ -120,6 +121,7 @@ const mensajeError = (e) =>
     : '')
 
 export default function CotizacionForm({ registro, borrador, user, onClose, onSaved }) {
+  const empresasBD = useEmpresas() // empresas de la Base de Datos
   // borrador: cliente e ítems que llegan desde el Cotizador (cotización nueva precargada)
   const base = registro || borrador || null
   const [f, setF] = useState(() => formInicial(base))
@@ -350,7 +352,8 @@ export default function CotizacionForm({ registro, borrador, user, onClose, onSa
           </div>
           {campo('n_cotizacion', 'N° Cotización', 'text', { required: true })}
           {campo('contacto', 'Contacto')}
-          {campo('cliente', 'Cliente', 'text', { required: true })}
+          {campo('cliente', 'Cliente / Empresa', 'text', { required: true, list: 'empresas-bd', autoComplete: 'off', placeholder: 'Busca una empresa de la Base de Datos…' })}
+          <datalist id="empresas-bd">{empresasBD.map((n) => <option key={n} value={n} />)}</datalist>
         </div>
 
         {/* ÍTEMS A COTIZAR */}
