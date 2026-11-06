@@ -1,576 +1,517 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../supabaseClient'
-import { MESES, fmtFecha, mesNumero, soloFecha } from '../lib/fechas'
-import { descargarIcs, enlaceGoogleCalendar } from '../lib/googleCalendar'
+import { diasEntre, fmtFecha, hhmm, hoyStr, rangosDe, soloFecha, textoRangos } from '../lib/fechas'
+import { descargarCsv, descargarExcel, registrarExportacion } from '../lib/exportar'
+import { apiDisponible, borrarEventosGoogle, descargarIcs, enlaceGoogleCalendar, sincronizarAlerta, tokenVigente } from '../lib/googleCalendar'
 import useEmpresas from '../lib/useEmpresas'
 
-// La auditoría (crear / editar / eliminar) la registra la base de datos automáticamente con triggers.
-const MAX_ITEMS = 50
-const MAX_FLETES = 5
-const MAX_GASTOS = 10
-const DIAS_ENTREGA = 10 // días hábiles estimados entre la OP y la entrega
+// Alertas que genera el sistema (no las escribe una persona)
+const ETIQUETA_TIPO = { entrega: '📦 Entrega', entrega_anticipada: '📦 Entrega anticipada', fecha_especial: '🎉 Fecha especial' }
 
-const TIPOS_MARCACION = ['Bordado', 'Estampado', 'Sublimación', 'Serigrafía', 'Tampografía', 'Grabado láser', 'DTF', 'Sin marcación']
-const TIPOS_FLETE = ['Transporte terrestre nacional', 'Mensajería urbana', 'Flete aéreo', 'Recogida en planta', 'Transporte de empaque', 'Otro']
+const DIAS_SEMANA = 7
+const DIAS_SEGUIMIENTO = 7
 
-const itemVacio = () => ({ producto: '', color: '', cantidad: 1, valor_unitario: '' })
-const fleteVacio = () => ({ tipo: TIPOS_FLETE[0], otro: '', precio: '' })
-const gastoVacio = () => ({ descripcion: '', cantidad: 1, valor_unitario: '' })
-// Total del renglón de otros gastos = cantidad x valor unitario (se calcula solo)
-const totalGasto = (g) => redondea((parseNum(g.cantidad) || 0) * (parseNum(g.valor_unitario) || 0))
-
-const input = 'w-full rounded-lg border border-white/10 bg-[#0b1026]/70 px-3 py-2 text-sm text-white outline-none focus:border-blue-500 disabled:opacity-50'
-const label = 'mb-1 block text-xs text-slate-400'
-const cop = (n) => (Number(n) || 0).toLocaleString('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 })
-const redondea = (n) => Math.round(n * 100) / 100
-const FECHA_OK = /^\d{4}-\d{2}-\d{2}$/
-
-// Convierte lo que escribe la persona en número: acepta 1500000, 1.500.000, 1,500,000 y 1.500.000,50
-// Devuelve null si está vacío y NaN si no es un número válido.
-export function parseNum(v) {
-  if (v === null || v === undefined) return null
-  if (typeof v === 'number') return Number.isFinite(v) ? v : NaN
-  let s = String(v).trim().replace(/[$\s]/g, '')
-  if (s === '') return null
-  const punto = s.lastIndexOf('.')
-  const coma = s.lastIndexOf(',')
-  if (punto >= 0 && coma >= 0) {
-    // el separador decimal es el que aparece al final
-    s = coma > punto ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '')
-  } else if (coma >= 0) {
-    s = /^-?\d{1,3}(,\d{3})+$/.test(s) ? s.replace(/,/g, '') : s.replace(',', '.')
-  } else if (punto >= 0 && /^-?\d{1,3}(\.\d{3})+$/.test(s)) {
-    s = s.replace(/\./g, '') // 1.500.000 (formato colombiano)
+// Rojo: vencida · Amarillo: vence hoy/mañana · Verde: a tiempo
+export function semaforo(fecha, estado) {
+  if (estado === 'Completado') {
+    return { nivel: 'ok', txt: 'Completada', cls: 'bg-slate-500/20 text-slate-300 border-slate-500/30' }
   }
-  return /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : NaN
+  if (!fecha) {
+    return { nivel: 'sin', txt: 'Sin fecha límite', cls: 'bg-slate-500/20 text-slate-300 border-slate-500/30' }
+  }
+  const dias = diasEntre(hoyStr(), soloFecha(fecha))
+  if (dias < 0) return { nivel: 'rojo', txt: `Vencida (${-dias}d)`, cls: 'bg-red-500/15 text-red-300 border-red-500/40' }
+  if (dias <= 1) return { nivel: 'amarillo', txt: dias === 0 ? 'Vence hoy' : 'Vence mañana', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/40' }
+  return { nivel: 'verde', txt: `A tiempo (${dias}d)`, cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40' }
 }
 
-function semanaISO(fecha) {
-  const d = new Date(fecha + 'T00:00:00')
-  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
-  t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7))
-  const inicio = new Date(Date.UTC(t.getUTCFullYear(), 0, 1))
-  return Math.ceil(((t - inicio) / 86400000 + 1) / 7)
+// "Activas" es la vista principal: las alertas completadas pasan solas al Archivo
+const FILTROS = [
+  ['activas', 'Activas'],
+  ['vencidas', 'Vencidas'],
+  ['hoy', 'Hoy'],
+  ['semana', 'Esta semana'],
+  ['despues', 'Más adelante'],
+  ['archivo', 'Archivo (completadas)'],
+  ['todas', 'Todas'],
+]
+
+const fmtCreada = (v) => {
+  if (!v) return 'sin fecha'
+  const d = new Date(v)
+  return Number.isNaN(d.getTime()) ? 'sin fecha' : d.toLocaleString('es-CO', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
+const diaCreada = (v) => { const d = v ? new Date(v) : null; return d && !Number.isNaN(d.getTime()) ? fmtFecha(d) : '' }
 
-// Fecha de entrega estimada: fecha de la OP + N días hábiles (sin sábados ni domingos; no descuenta festivos)
-function entregaEstimada(fechaOp, habiles = DIAS_ENTREGA) {
-  if (!FECHA_OK.test(fechaOp || '')) return ''
-  const d = new Date(fechaOp + 'T00:00:00')
-  let n = 0
-  while (n < habiles) {
-    d.setDate(d.getDate() + 1)
-    if (d.getDay() !== 0 && d.getDay() !== 6) n += 1
-  }
-  return fmtFecha(d)
-}
+const COLUMNAS_EXPORT = [
+  { k: 'titulo', t: 'Tarea', f: (a) => a.titulo || a.descripcion || '' },
+  { k: 'cliente', t: 'Cliente / Empresa' },
+  { k: 'n_cotizacion', t: 'Cotización' },
+  { k: 'fecha_limite', t: 'Fecha límite', f: (a) => soloFecha(a.fecha_limite) },
+  { k: 'horario', t: 'Horario', f: (a) => textoRangos(a) },
+  { k: 'estado', t: 'Estado', f: (a) => a.estado || 'Pendiente' },
+  { k: 'usuario', t: 'Creada por', f: (a) => a.usuario_nombre || a.usuario_email || '' },
+  { k: 'created_at', t: 'Fecha de creación', f: (a) => (a.created_at ? fmtCreada(a.created_at) : '') },
+]
 
-// Ítems iniciales: los guardados (también los de versiones anteriores) o uno armado con los campos antiguos
-function itemsIniciales(registro) {
-  if (registro && Array.isArray(registro.items) && registro.items.length) {
-    return registro.items.map((i) => ({
-      producto: i.producto ?? i.referencia ?? '',
-      color: i.color ?? '',
-      cantidad: i.cantidad ?? 1,
-      valor_unitario: i.valor_unitario ?? '',
-    }))
-  }
-  if (registro) {
-    return [{
-      producto: registro.referencia ?? '',
-      color: '',
-      cantidad: Number(registro.cantidad) || 1,
-      valor_unitario: registro.valor_unitario ?? '',
-    }]
-  }
-  return [itemVacio()]
-}
+const input = 'rounded-lg border border-white/10 bg-[#0b1026]/70 px-3 py-2 text-sm text-white outline-none focus:border-blue-500'
+const boton = 'rounded-md border border-white/15 px-2 py-1 text-xs text-slate-100 hover:bg-white/10'
+const FORM_VACIO = { titulo: '', fecha: '', ini: '', fin: '', partido: false, ini2: '', fin2: '' }
 
-const fletesIniciales = (registro) =>
-  (Array.isArray(registro?.fletes) ? registro.fletes : []).slice(0, MAX_FLETES).map((f) => {
-    const d = f.descripcion ?? ''
-    const conocido = TIPOS_FLETE.includes(d)
-    return { tipo: conocido ? d : (d ? 'Otro' : TIPOS_FLETE[0]), otro: conocido ? '' : d, precio: f.precio ?? '' }
-  })
-
-const gastosIniciales = (registro) =>
-  (Array.isArray(registro?.gastos_adicionales) ? registro.gastos_adicionales : []).slice(0, MAX_GASTOS)
-    // Los gastos guardados antes solo tenían "valor": se leen como cantidad 1 x ese valor
-    .map((g) => ({ descripcion: g.descripcion ?? '', cantidad: g.cantidad ?? 1, valor_unitario: g.valor_unitario ?? g.valor ?? '' }))
-
-// Estado inicial del formulario. Las fechas se limpian a AAAA-MM-DD (así el campo de fecha siempre las muestra)
-// y los números y textos nulos pasan a '' para que ningún campo quede "roto" al editar.
-function formInicial(r) {
-  const t = (v) => (v === null || v === undefined ? '' : String(v))
-  return {
-    fecha_envio: soloFecha(r?.fecha_envio), semana: t(r?.semana), mes: r ? mesNumero(r.mes) : '',
-    n_cotizacion: t(r?.n_cotizacion), contacto: t(r?.contacto), cliente: t(r?.cliente),
-    estado: r?.estado || 'Pendiente', motivo_negacion: t(r?.motivo_negacion),
-    fecha_op: soloFecha(r?.fecha_op), num_op: t(r?.num_op), valor_aprobado: t(r?.valor_aprobado),
-    rentabilidad_pct: t(r?.rentabilidad_pct), n_factura: t(r?.n_factura), fecha_facturacion: soloFecha(r?.fecha_facturacion),
-    tipo_marcacion: t(r?.tipo_marcacion), precio_marcacion: t(r?.precio_marcacion),
-    fecha_entrega: soloFecha(r?.fecha_entrega), fecha_entrega_anticipada: soloFecha(r?.fecha_entrega_anticipada),
-    valor_positivos: t(r?.valor_positivos),
-    dtf: r?.dtf === true, dtf_metros: t(r?.dtf_metros),
-  }
-}
-
-const mensajeError = (e) =>
-  e.message + (/schema cache|column|relation|invalid input syntax|violates/i.test(e.message)
-    ? ' — Ejecuta supabase_schema.sql completo en Supabase (SQL Editor) y recarga la página.'
-    : '')
-
-export default function CotizacionForm({ registro, borrador, user, onClose, onSaved }) {
-  const empresasBD = useEmpresas() // empresas de la Base de Datos
-  // borrador: cliente e ítems que llegan desde el Cotizador (cotización nueva precargada)
-  const base = registro || borrador || null
-  const [f, setF] = useState(() => formInicial(base))
-  const [items, setItems] = useState(() => itemsIniciales(base))
-  const [nTexto, setNTexto] = useState(() => String(itemsIniciales(base).length))
-  const [fletes, setFletes] = useState(() => fletesIniciales(registro))
-  const [gastos, setGastos] = useState(() => gastosIniciales(registro))
-  // La fecha de entrega se calcula sola mientras nadie la cambie a mano
-  const [entregaManual, setEntregaManual] = useState(() => !!registro?.fecha_entrega)
-  const [guardando, setGuardando] = useState(false)
+export default function Agenda({
+  user, nombre, superAdmin = false, cotizacionId, nCotizacion, cliente,
+  cotizaciones = [], filtroForzado, onChange,
+}) {
+  const clientes = useEmpresas() // empresas de la Base de Datos
+  const global = !cotizacionId
+  const [items, setItems] = useState([])
+  const [f, setF] = useState(FORM_VACIO)
+  const [empresa, setEmpresa] = useState(cliente || '')
+  const [editId, setEditId] = useState(null)
+  const [filtro, setFiltro] = useState('activas')
+  const [busqueda, setBusqueda] = useState('')
+  const [fEstado, setFEstado] = useState('Todos')
+  const [fCreador, setFCreador] = useState('Todos')
+  const [fCliente, setFCliente] = useState('Todos')
+  const [fDesde, setFDesde] = useState('')
+  const [fHasta, setFHasta] = useState('')
+  const [fCreadaDesde, setFCreadaDesde] = useState('')
+  const [fCreadaHasta, setFCreadaHasta] = useState('')
+  const [avanzado, setAvanzado] = useState(false)
+  const [aGoogle, setAGoogle] = useState(true)
   const [error, setError] = useState('')
+  const [aviso, setAviso] = useState('')
+  const [cargando, setCargando] = useState(true)
 
-  const aprobado = f.estado === 'Aprobado'
-  const totalItem = (it) => (Number(it.cantidad) || 0) * (Number(it.valor_unitario) || 0)
-  const total = items.reduce((a, i) => a + totalItem(i), 0)
-  const cantidadTotal = items.reduce((a, i) => a + (Number(i.cantidad) || 0), 0)
-  const totalFletes = fletes.reduce((a, x) => a + (parseNum(x.precio) || 0), 0)
-  const totalGastos = gastos.reduce((a, x) => a + totalGasto(x), 0)
+  // Desde el panel del Dashboard se puede abrir directamente un filtro (vencidas, hoy, etc.)
+  useEffect(() => { if (filtroForzado?.f) setFiltro(filtroForzado.f) }, [filtroForzado])
 
-  const set = (k, v) => setF((p) => {
-    const n = { ...p, [k]: v }
-    if (k === 'fecha_envio' && v) {
-      n.semana = semanaISO(v)
-      n.mes = new Date(v + 'T00:00:00').getMonth() + 1
+  const cargar = useCallback(async () => {
+    setCargando(true)
+    let q = supabase.from('alertas').select('*')
+    // El id se envía como texto: la columna es texto y sirve con ids uuid o numéricos (evita "invalid input syntax for type uuid")
+    if (cotizacionId !== undefined && cotizacionId !== null) q = q.eq('cotizacion_id', String(cotizacionId))
+    const { data, error } = await q
+    if (error) {
+      setError(`No se pudieron cargar las alertas: ${error.message}`)
+      setItems([])
+    } else {
+      // Orden en el cliente: así no se oculta ninguna fila aunque falte la fecha
+      const ordenadas = (data || []).slice().sort((a, b) =>
+        (soloFecha(a.fecha_limite) || '9999-12-31').localeCompare(soloFecha(b.fecha_limite) || '9999-12-31') ||
+        hhmm(a.hora_inicio).localeCompare(hhmm(b.hora_inicio))
+      )
+      setItems(ordenadas)
+      setError('')
     }
-    if (k === 'fecha_op' && !entregaManual) n.fecha_entrega = entregaEstimada(v)
-    if (k === 'estado' && v === 'Aprobado' && !entregaManual && !p.fecha_entrega && p.fecha_op) n.fecha_entrega = entregaEstimada(p.fecha_op)
-    return n
-  })
+    setCargando(false)
+  }, [cotizacionId])
 
-  // Agrega la entrega al calendario desde el formulario (enlace directo a Google Calendar o archivo .ics)
-  // Botones «Google Calendar» y «.ics» para cualquier casilla de fecha (como en la sección de Alertas)
-  const botonesCalendario = (fecha, titulo, tipo = 'manual') => {
-    if (!fecha || !FECHA_OK.test(fecha)) return null
-    const ev = { id: `${f.n_cotizacion || 'nueva'}-${titulo}`, titulo, cliente: f.cliente, n_cotizacion: f.n_cotizacion, tipo, fecha_limite: fecha }
-    return (
-      <p className="mt-1 flex flex-wrap items-center gap-2 text-xs">
-        <a href={enlaceGoogleCalendar(ev)} target="_blank" rel="noreferrer"
-          className="rounded-md bg-sky-600 px-2 py-1 font-medium text-white hover:bg-sky-500">📅 Google Calendar</a>
-        <button type="button" onClick={() => descargarIcs(ev)} className="rounded-md bg-white/10 px-2 py-1 text-slate-200 hover:bg-white/20">.ics</button>
-      </p>
-    )
-  }
+  useEffect(() => { cargar() }, [cargar])
 
-  const recalcularEntrega = () => { setEntregaManual(false); setF((p) => ({ ...p, fecha_entrega: entregaEstimada(p.fecha_op) })) }
+  const refrescar = async () => { await cargar(); onChange?.() }
+  const set = (k, v) => setF((p) => ({ ...p, [k]: v }))
+  const puedeGestionar = (a) => superAdmin || a.usuario_id === user.id
 
-  // "Número de ítems": genera o recorta las filas de productos
-  const aplicarN = (n) => {
-    if (n < items.length) {
-      const conDatos = items.slice(n).some((i) => String(i.producto).trim() || String(i.color).trim() || String(i.valor_unitario).trim())
-      if (conDatos && !window.confirm(`Se quitarán ${items.length - n} ítem(s) que tienen datos. ¿Continuar?`)) {
-        setNTexto(String(items.length))
-        return
-      }
-      setItems(items.slice(0, n))
-    } else if (n > items.length) {
-      setItems([...items, ...Array.from({ length: n - items.length }, itemVacio)])
+  const limpiarForm = () => { setF(FORM_VACIO); setEditId(null); if (!cliente) setEmpresa('') }
+
+  const sincronizar = (alerta) => sincronizarAlerta(alerta)
+
+  const validar = () => {
+    if (!f.titulo.trim() || !f.fecha) return 'Escribe la tarea y la fecha límite.'
+    if (!f.ini || !f.fin) return 'Selecciona el rango de hora (desde y hasta).'
+    if (f.fin <= f.ini) return 'En el rango de hora, "hasta" debe ser posterior a "desde".'
+    if (f.partido) {
+      if (!f.ini2 || !f.fin2) return 'Horario partido: completa también el segundo rango de hora.'
+      if (f.fin2 <= f.ini2) return 'En el segundo rango, "hasta" debe ser posterior a "desde".'
+      if (f.ini2 < f.fin) return 'El segundo rango debe empezar después de que termine el primero.'
     }
-    setNTexto(String(n))
+    return ''
   }
-
-  const cambiaN = (texto) => {
-    setNTexto(texto)
-    const n = parseInt(texto, 10)
-    if (n >= 1 && n <= MAX_ITEMS) aplicarN(n)
-  }
-
-  const setItem = (idx, k, v) => setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, [k]: v } : it)))
-  const setFlete = (i, k, v) => setFletes((p) => p.map((x, j) => (j === i ? { ...x, [k]: v } : x)))
-  const setGasto = (i, k, v) => setGastos((p) => p.map((x, j) => (j === i ? { ...x, [k]: v } : x)))
-
-  const cantidadFletes = (n) => setFletes((p) => (n <= p.length ? p.slice(0, n) : [...p, ...Array.from({ length: n - p.length }, fleteVacio)]))
-  const cantidadGastos = (n) => setGastos((p) => (n <= p.length ? p.slice(0, n) : [...p, ...Array.from({ length: n - p.length }, gastoVacio)]))
 
   const guardar = async (e) => {
     e.preventDefault()
-    setError('')
+    setAviso('')
+    const msg = validar()
+    if (msg) { setError(msg); return }
 
-    // --- Ítems ---
-    const itemsFinal = items.map((i) => {
-      const cantidad = parseNum(i.cantidad)
-      const valor = parseNum(i.valor_unitario)
-      return { producto: String(i.producto).trim(), color: String(i.color).trim(), cantidad, valor_unitario: valor }
-    })
-    const invalido = itemsFinal.some(
-      (i) => !i.producto || !(i.cantidad > 0) || i.valor_unitario === null || Number.isNaN(i.valor_unitario) || i.valor_unitario < 0
-    )
-    if (invalido) {
-      setError('Completa todos los ítems: nombre del producto, cantidad (mayor a 0) y valor unitario.')
+    const campos = {
+      titulo: f.titulo.trim(),
+      fecha_limite: f.fecha,
+      hora_inicio: f.ini,
+      hora_fin: f.fin,
+      hora_inicio2: f.partido ? f.ini2 : null,
+      hora_fin2: f.partido ? f.fin2 : null,
+      cliente: (cliente || empresa).trim() || null,
+    }
+
+    if (editId) {
+      const { data, error } = await supabase.from('alertas').update(campos).eq('id', editId).select('id')
+      if (error) { setError(`No se pudo guardar: ${error.message}${/column|schema cache/i.test(error.message) ? ' — Ejecuta supabase_schema.sql en Supabase.' : ''}`); return }
+      if (!data?.length) { setError('Solo quien creó la alerta (o el super admin) puede modificarla.'); return }
+      limpiarForm(); setError(''); setAviso('Alerta actualizada.')
+      refrescar()
       return
     }
-    const limpios = itemsFinal.map((i) => ({ ...i, total: redondea(i.cantidad * i.valor_unitario) }))
 
-    // --- Campos generales: fechas, números y textos ---
-    const fechas = { fecha_envio: 'Fecha de envío', fecha_op: 'Fecha OP', fecha_facturacion: 'Fecha de facturación' }
-    for (const [k, nombre] of Object.entries(fechas)) {
-      if (f[k] && !FECHA_OK.test(f[k])) { setError(`${nombre}: la fecha no es válida.`); return }
-    }
-    const valorAprobado = parseNum(f.valor_aprobado)
-    if (Number.isNaN(valorAprobado) || (valorAprobado !== null && valorAprobado < 0)) { setError('Valor aprobado: escribe solo un número positivo (ej. 1500000).'); return }
-    const pct = parseNum(f.rentabilidad_pct)
-    if (Number.isNaN(pct) || (pct !== null && (pct < -100 || pct > 1000))) { setError('El % de rentabilidad debe ser un número entre -100 y 1000.'); return }
-    const semana = parseNum(f.semana)
-    if (Number.isNaN(semana)) { setError('La semana debe ser un número.'); return }
-
-    const texto = (v) => (String(v ?? '').trim() === '' ? null : String(v).trim())
-    const totalItems = redondea(limpios.reduce((a, i) => a + i.total, 0))
-    const cantTotal = limpios.reduce((a, i) => a + i.cantidad, 0)
-
-    const payload = {
-      fecha_envio: f.fecha_envio || null,
-      semana,
-      mes: f.mes === '' ? null : Number(f.mes),
-      n_cotizacion: texto(f.n_cotizacion),
-      contacto: texto(f.contacto),
-      cliente: texto(f.cliente),
-      estado: f.estado,
-      motivo_negacion: f.estado === 'Negado' ? texto(f.motivo_negacion) : null,
-      fecha_op: f.fecha_op || null,
-      num_op: texto(f.num_op),
-      valor_aprobado: valorAprobado,
-      rentabilidad_pct: pct,
-      n_factura: texto(f.n_factura),
-      fecha_facturacion: f.fecha_facturacion || null,
-      items: limpios,
-      referencia: limpios.map((i) => (i.color ? `${i.producto} (${i.color})` : i.producto)).join(' / '),
-      cantidad: cantTotal,
-      valor_unitario: cantTotal ? redondea(totalItems / cantTotal) : 0, // promedio ponderado
-      valor_total: totalItems,
-    }
-
-    // --- Campos de órdenes aprobadas (solo se envían con estado Aprobado; si no, se respetan los guardados) ---
-    if (aprobado) {
-      if (f.fecha_entrega && !FECHA_OK.test(f.fecha_entrega)) { setError('Fecha de entrega: la fecha no es válida.'); return }
-      if (f.fecha_entrega_anticipada && !FECHA_OK.test(f.fecha_entrega_anticipada)) { setError('Fecha anticipada de entrega: la fecha no es válida.'); return }
-      if (f.fecha_entrega_anticipada && f.fecha_entrega && f.fecha_entrega_anticipada > f.fecha_entrega) {
-        setError('La fecha anticipada de entrega debe ser igual o anterior a la fecha de entrega.')
-        return
-      }
-      const precioMarc = parseNum(f.precio_marcacion)
-      const positivos = parseNum(f.valor_positivos)
-      const metros = f.dtf ? parseNum(f.dtf_metros) : null
-      if ([precioMarc, positivos, metros].some((n) => Number.isNaN(n) || (n !== null && n < 0))) {
-        setError('Precio de marcación, valor de positivos y metros de DTF deben ser números positivos.')
-        return
-      }
-
-      const fletesFinal = []
-      for (let i = 0; i < fletes.length; i += 1) {
-        const x = fletes[i]
-        const descripcion = x.tipo === 'Otro' ? x.otro.trim() : x.tipo
-        const precio = parseNum(x.precio)
-        if (!descripcion || precio === null || Number.isNaN(precio) || precio < 0) { setError(`Flete ${i + 1}: completa la descripción y un precio válido.`); return }
-        fletesFinal.push({ descripcion, precio })
-      }
-      const gastosFinal = []
-      for (let i = 0; i < gastos.length; i += 1) {
-        const x = gastos[i]
-        const cantidad = parseNum(x.cantidad)
-        const valorUnitario = parseNum(x.valor_unitario)
-        if (!x.descripcion.trim() || !(cantidad > 0) || valorUnitario === null || Number.isNaN(valorUnitario) || valorUnitario < 0) {
-          setError(`Gasto adicional ${i + 1}: completa la descripción, una cantidad mayor a 0 y un valor unitario válido.`)
-          return
-        }
-        // "valor" queda como el total del renglón (cantidad x valor unitario) para que los reportes sigan funcionando
-        gastosFinal.push({ descripcion: x.descripcion.trim(), cantidad, valor_unitario: valorUnitario, valor: redondea(cantidad * valorUnitario) })
-      }
-
-      Object.assign(payload, {
-        tipo_marcacion: texto(f.tipo_marcacion),
-        precio_marcacion: precioMarc,
-        fecha_entrega: f.fecha_entrega || null,
-        fecha_entrega_anticipada: f.fecha_entrega_anticipada || null,
-        valor_positivos: positivos,
-        dtf: f.dtf,
-        dtf_metros: metros,
-        fletes: fletesFinal,
-        gastos_adicionales: gastosFinal,
+    const { data, error } = await supabase
+      .from('alertas')
+      .insert({
+        ...campos,
+        estado: 'Pendiente',
+        usuario_email: user.email,
+        usuario_nombre: nombre || user.email,
+        cotizacion_id: cotizacionId !== undefined && cotizacionId !== null ? String(cotizacionId) : null,
+        tipo: 'manual',
+        n_cotizacion: nCotizacion || null,
       })
-    }
+      .select()
+      .single()
+    if (error) { setError(`No se pudo guardar la alerta: ${error.message}${/column|schema cache/i.test(error.message) ? ' — Ejecuta supabase_schema.sql completo en Supabase (SQL Editor) y recarga la página.' : ''}`); return }
 
-    setGuardando(true)
-    if (registro?.id) {
-      const { data, error } = await supabase.from('cotizaciones').update(payload).eq('id', registro.id).select('id')
-      if (error) { setError(mensajeError(error)); setGuardando(false); return }
-      if (!data?.length) {
-        setError('No tienes permiso para modificar esta cotización.')
-        setGuardando(false)
-        return
+    limpiarForm(); setError('')
+
+    if (aGoogle) {
+      if (apiDisponible) {
+        try { await sincronizar(data); setAviso('Alerta guardada y sincronizada con Google Calendar.') }
+        catch (err) { setError(`La alerta se guardó, pero no se pudo sincronizar con Google Calendar: ${err.message}`) }
+      } else {
+        window.open(enlaceGoogleCalendar(data, 0), '_blank', 'noopener')
+        setAviso(data.hora_inicio2
+          ? 'Alerta guardada. Se abrió Google Calendar con el primer rango; el segundo se agrega con el botón "Calendar 2" de la alerta.'
+          : 'Alerta guardada. Se abrió Google Calendar para que confirmes el evento.')
       }
-    } else {
-      const { error } = await supabase
-        .from('cotizaciones')
-        .insert({ ...payload, usuario_email: user.email })
-        .select('id')
-        .single()
-      if (error) { setError(mensajeError(error)); setGuardando(false); return }
     }
-    setGuardando(false)
-    onSaved()
+    refrescar()
   }
 
-  const campo = (k, titulo, type = 'text', extra = {}) => (
-    <div>
-      <label className={label}>{titulo}</label>
-      <input type={type} value={f[k] ?? ''} onChange={(e) => set(k, e.target.value)} className={input} {...extra} />
-      {type === 'date' && botonesCalendario(f[k], `${titulo}${f.cliente ? ` - ${f.cliente}` : ''}`)}
-    </div>
+  const editar = (a) => {
+    setF({
+      titulo: a.titulo || a.descripcion || '',
+      fecha: soloFecha(a.fecha_limite),
+      ini: hhmm(a.hora_inicio), fin: hhmm(a.hora_fin),
+      partido: !!(a.hora_inicio2 && a.hora_fin2),
+      ini2: hhmm(a.hora_inicio2), fin2: hhmm(a.hora_fin2),
+    })
+    if (!cliente) setEmpresa(a.cliente || '')
+    setEditId(a.id)
+    setError(''); setAviso('')
+    document.getElementById('form-alerta')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+
+  const desdeSeguimiento = (c) => {
+    limpiarForm()
+    setF({ ...FORM_VACIO, titulo: `Seguimiento cotización ${c.n_cotizacion || ''}`.trim() })
+    setEmpresa(c.cliente || '')
+    document.getElementById('form-alerta')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+
+  const sincronizarFila = async (t) => {
+    try { await sincronizar(t); setError(''); setAviso('Evento creado en Google Calendar.'); refrescar() }
+    catch (err) { setError(`No se pudo sincronizar con Google Calendar: ${err.message}`) }
+  }
+
+  const cambiarEstado = async (id, estado) => {
+    const { data, error } = await supabase.from('alertas').update({ estado }).eq('id', id).select('id')
+    if (error) setError(error.message)
+    else if (!data?.length) setError('Solo quien creó la alerta (o el super admin) puede modificarla.')
+    refrescar()
+  }
+
+  const borrar = async (a) => {
+    if (!window.confirm(`¿Eliminar la alerta "${a.titulo || a.descripcion}"?`)) return
+    const { data, error } = await supabase.from('alertas').delete().eq('id', a.id).select('id')
+    if (error) setError(error.message)
+    else if (!data?.length) setError('Solo quien creó la alerta (o el super admin) puede eliminarla.')
+    else if (a.gcal_event_id && apiDisponible && tokenVigente()) {
+      // también se quita del calendario (si no hay sesión de Google activa, el evento hay que borrarlo allí a mano)
+      try { await borrarEventosGoogle(a.gcal_event_id) } catch { setAviso('La alerta se eliminó, pero no se pudo quitar el evento de Google Calendar.') }
+    } else if (a.gcal_event_id) {
+      setAviso('La alerta se eliminó. Su evento sigue en Google Calendar: conéctalo y vuelve a intentar, o bórralo allí.')
+    }
+    if (editId === a.id) limpiarForm()
+    refrescar()
+  }
+
+  const hoy = hoyStr()
+  const dias = (a) => (a.fecha_limite ? diasEntre(hoy, soloFecha(a.fecha_limite)) : null)
+  const abierta = (a) => a.estado !== 'Completado'
+
+  const cuentas = useMemo(() => ({
+    activas: items.filter(abierta).length,
+    vencidas: items.filter((a) => abierta(a) && dias(a) !== null && dias(a) < 0).length,
+    hoy: items.filter((a) => abierta(a) && dias(a) === 0).length,
+    semana: items.filter((a) => abierta(a) && dias(a) > 0 && dias(a) <= DIAS_SEMANA).length,
+    despues: items.filter((a) => abierta(a) && dias(a) > DIAS_SEMANA).length,
+    archivo: items.filter((a) => !abierta(a)).length,
+    todas: items.length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [items, hoy])
+
+  const creadores = useMemo(() => [...new Set(items.map((a) => a.usuario_nombre || a.usuario_email).filter(Boolean))].sort(), [items])
+  const empresas = useMemo(() => [...new Set(items.map((a) => a.cliente).filter(Boolean))].sort(), [items])
+
+  const hayFiltros = !!(busqueda || fEstado !== 'Todos' || fCreador !== 'Todos' || fCliente !== 'Todos' || fDesde || fHasta || fCreadaDesde || fCreadaHasta)
+  const limpiarFiltros = () => {
+    setBusqueda(''); setFEstado('Todos'); setFCreador('Todos'); setFCliente('Todos')
+    setFDesde(''); setFHasta(''); setFCreadaDesde(''); setFCreadaHasta('')
+  }
+
+  const visibles = items.filter((a) => {
+    const d = dias(a)
+    const vista = (() => {
+      switch (filtro) {
+        case 'activas': return abierta(a) || fEstado === 'Completado'
+        case 'vencidas': return abierta(a) && d !== null && d < 0
+        case 'hoy': return abierta(a) && d === 0
+        case 'semana': return abierta(a) && d > 0 && d <= DIAS_SEMANA
+        case 'despues': return abierta(a) && d > DIAS_SEMANA
+        case 'archivo': return !abierta(a)
+        default: return true
+      }
+    })()
+    if (!vista) return false
+    const q = busqueda.toLowerCase().trim()
+    if (q && ![a.titulo, a.descripcion, a.cliente, a.n_cotizacion, a.usuario_nombre, a.usuario_email].some((v) => (v || '').toLowerCase().includes(q))) return false
+    if (fEstado !== 'Todos' && (a.estado || 'Pendiente') !== fEstado) return false
+    if (fCreador !== 'Todos' && (a.usuario_nombre || a.usuario_email) !== fCreador) return false
+    if (fCliente !== 'Todos' && a.cliente !== fCliente) return false
+    const fl = soloFecha(a.fecha_limite)
+    if (fDesde && (!fl || fl < fDesde)) return false
+    if (fHasta && (!fl || fl > fHasta)) return false
+    const dc = diaCreada(a.created_at)
+    if (fCreadaDesde && (!dc || dc < fCreadaDesde)) return false
+    if (fCreadaHasta && (!dc || dc > fCreadaHasta)) return false
+    return true
+  })
+
+  const exportar = (tipo) => {
+    if (!visibles.length) { setError('No hay alertas para exportar con los filtros actuales.'); return }
+    if (tipo === 'csv') descargarCsv('alertas', COLUMNAS_EXPORT, visibles)
+    else descargarExcel('alertas', COLUMNAS_EXPORT, visibles)
+    registrarExportacion('Alertas', `${tipo.toUpperCase()} · ${visibles.length} alertas`)
+  }
+
+  const seguimientos = useMemo(
+    () => cotizaciones
+      .filter((c) => c.estado === 'Pendiente' && c.fecha_envio)
+      .map((c) => ({ ...c, dias: diasEntre(soloFecha(c.fecha_envio), hoy) }))
+      .filter((c) => c.dias >= DIAS_SEGUIMIENTO)
+      .sort((a, b) => b.dias - a.dias),
+    [cotizaciones, hoy]
   )
 
+  const mostrarSeguimientos = global && ['activas', 'todas', 'seguimientos'].includes(filtro)
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <form onSubmit={guardar} className="max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-2xl border border-white/10 bg-[#141a3d] p-6 shadow-2xl">
-        <div className="mb-5 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-white">{registro ? 'Editar cotización' : 'Nueva cotización'}</h2>
-          <button type="button" onClick={onClose} className="text-slate-400 hover:text-white">✕</button>
-        </div>
-
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {campo('fecha_envio', 'Fecha Envío', 'date')}
-          {campo('semana', 'Semana', 'number')}
-          <div>
-            <label className={label}>Mes</label>
-            <select value={f.mes ?? ''} onChange={(e) => set('mes', e.target.value === '' ? '' : Number(e.target.value))} className={input}>
-              <option value="">Seleccionar…</option>
-              {MESES.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
-            </select>
-          </div>
-          {campo('n_cotizacion', 'N° Cotización', 'text', { required: true })}
-          {campo('contacto', 'Contacto')}
-          {campo('cliente', 'Cliente / Empresa', 'text', { required: true, list: 'empresas-bd', autoComplete: 'off', placeholder: 'Busca una empresa de la Base de Datos…' })}
-          <datalist id="empresas-bd">{empresasBD.map((n) => <option key={n} value={n} />)}</datalist>
-        </div>
-
-        {/* ÍTEMS A COTIZAR */}
-        <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-4">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-white">Productos a cotizar</p>
-            <div className="flex items-center gap-2">
-              <label htmlFor="n-items" className="text-xs text-slate-400">Número de ítems</label>
-              <button type="button" onClick={() => aplicarN(Math.max(1, items.length - 1))} disabled={items.length <= 1}
-                className="h-8 w-8 rounded-lg border border-white/15 text-white hover:bg-white/10 disabled:opacity-40">−</button>
-              <input id="n-items" type="number" min="1" max={MAX_ITEMS} value={nTexto}
-                onChange={(e) => cambiaN(e.target.value)} onBlur={() => setNTexto(String(items.length))}
-                className="h-8 w-16 rounded-lg border border-white/10 bg-[#0b1026]/70 text-center text-sm text-white outline-none focus:border-blue-500" />
-              <button type="button" onClick={() => aplicarN(Math.min(MAX_ITEMS, items.length + 1))} disabled={items.length >= MAX_ITEMS}
-                className="h-8 w-8 rounded-lg border border-white/15 text-white hover:bg-white/10 disabled:opacity-40">+</button>
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            {items.map((it, idx) => (
-              <div key={idx} className="grid grid-cols-1 items-end gap-3 rounded-lg border border-white/10 bg-[#0b1026]/40 p-3 sm:grid-cols-12">
-                <div className="text-xs font-semibold text-violet-300 sm:col-span-12">Ítem {idx + 1}</div>
-                <div className="sm:col-span-4">
-                  <label className={label}>Nombre del producto</label>
-                  <input value={it.producto} onChange={(e) => setItem(idx, 'producto', e.target.value)} className={input} />
-                </div>
-                <div className="sm:col-span-2">
-                  <label className={label}>Color</label>
-                  <input value={it.color} onChange={(e) => setItem(idx, 'color', e.target.value)} className={input} />
-                </div>
-                <div className="sm:col-span-2">
-                  <label className={label}>Cantidad</label>
-                  <input type="number" min="0" step="any" value={it.cantidad} onChange={(e) => setItem(idx, 'cantidad', e.target.value)} className={input} />
-                </div>
-                <div className="sm:col-span-2">
-                  <label className={label}>Valor unitario</label>
-                  <input type="number" min="0" step="any" value={it.valor_unitario} onChange={(e) => setItem(idx, 'valor_unitario', e.target.value)} className={input} />
-                </div>
-                <div className="sm:col-span-2">
-                  <label className={label}>Total del ítem</label>
-                  <div className={`${input} bg-violet-500/10 font-semibold text-violet-300`}>{cop(totalItem(it))}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-4 flex flex-wrap items-center justify-end gap-x-8 gap-y-1 border-t border-white/10 pt-3 text-sm">
-            <span className="text-slate-400">Unidades: <b className="text-white">{cantidadTotal}</b></span>
-            <span className="text-slate-300">Total general: <b className="text-lg text-violet-300">{cop(total)}</b></span>
-          </div>
-        </div>
-
-        {/* ESTADO, OP, FACTURA */}
-        <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <div>
-            <label className={label}>Estado Cotización</label>
-            <select value={f.estado} onChange={(e) => set('estado', e.target.value)} className={input}>
-              <option>Pendiente</option><option>Aprobado</option><option>Negado</option>
-            </select>
-          </div>
-          {campo('motivo_negacion', 'Motivo Negación', 'text', { disabled: f.estado !== 'Negado' })}
-          {campo('fecha_op', 'Fecha OP', 'date')}
-          {campo('num_op', '# OP')}
-          <div>
-            <label className={label}>Valor Aprobado</label>
-            <input type="text" inputMode="decimal" value={f.valor_aprobado} onChange={(e) => set('valor_aprobado', e.target.value)}
-              className={input} placeholder="Ej. 1500000" />
-            {total > 0 && (
-              <button type="button" onClick={() => set('valor_aprobado', String(redondea(total)))} className="mt-1 text-xs text-blue-300 hover:underline">
-                Usar el total de la cotización ({cop(total)})
-              </button>
-            )}
-          </div>
-          <div>
-            <label className={label}>% Rentabilidad (proyectada)</label>
-            <div className="relative">
-              <input type="number" step="0.01" min="-100" max="1000" value={f.rentabilidad_pct}
-                onChange={(e) => set('rentabilidad_pct', e.target.value)} className={`${input} pr-8`} placeholder="Ej. 25" />
-              <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">%</span>
-            </div>
-          </div>
-          {campo('n_factura', 'N° Factura')}
-          {campo('fecha_facturacion', 'Fecha Facturación', 'date')}
-        </div>
-
-        {/* ORDEN APROBADA: se habilita solo con estado Aprobado */}
-        <fieldset disabled={!aprobado} className={`mt-6 rounded-xl border p-4 ${aprobado ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-white/10 bg-white/[0.02] opacity-60'}`}>
-          <legend className="px-2 text-sm font-semibold text-white">Datos de la orden aprobada</legend>
-          {!aprobado && <p className="mb-3 text-xs text-slate-400">Estos campos se habilitan automáticamente cuando el estado es <b>Aprobado</b>.</p>}
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <div>
-              <label className={label}>Tipo de marcación</label>
-              <input list="tipos-marcacion" value={f.tipo_marcacion} onChange={(e) => set('tipo_marcacion', e.target.value)} className={input} placeholder="Elige o escribe" />
-              <datalist id="tipos-marcacion">{TIPOS_MARCACION.map((t) => <option key={t} value={t} />)}</datalist>
-            </div>
-            <div>
-              <label className={label}>Precio de marcación</label>
-              <input type="text" inputMode="decimal" value={f.precio_marcacion} onChange={(e) => set('precio_marcacion', e.target.value)} className={input} />
-            </div>
-            <div>
-              <label className={label}>Valor de los positivos</label>
-              <input type="text" inputMode="decimal" value={f.valor_positivos} onChange={(e) => set('valor_positivos', e.target.value)} className={input} />
-            </div>
-            <div>
-              <label className={label}>Fecha de entrega {!entregaManual && f.fecha_entrega ? '(estimada automática)' : ''}</label>
-              <input type="date" value={f.fecha_entrega} onChange={(e) => { setEntregaManual(true); set('fecha_entrega', e.target.value) }} className={input} />
-              <p className="mt-1 text-xs text-slate-500">
-                Se calcula con la Fecha OP + {DIAS_ENTREGA} días hábiles (sin festivos).{' '}
-                {entregaManual && f.fecha_op && <button type="button" onClick={recalcularEntrega} className="text-blue-300 hover:underline">Recalcular</button>}
-              </p>
-              {botonesCalendario(f.fecha_entrega, 'Entrega de pedido', 'entrega')}
-            </div>
-            <div>
-              <label className={label}>Fecha anticipada de entrega (opcional)</label>
-              <input type="date" value={f.fecha_entrega_anticipada} onChange={(e) => set('fecha_entrega_anticipada', e.target.value)} className={input} />
-              <p className="mt-1 text-xs text-slate-500">Debe ser igual o anterior a la fecha de entrega. Ambas fechas se agendan solas como alertas al guardar la cotización aprobada.</p>
-              {botonesCalendario(f.fecha_entrega_anticipada, 'Entrega anticipada de pedido', 'entrega_anticipada')}
-            </div>
-            <div>
-              <label className="flex cursor-pointer items-center gap-2 pt-6 text-sm text-slate-200">
-                <input type="checkbox" checked={f.dtf} onChange={(e) => set('dtf', e.target.checked)} /> Incluye DTF
-              </label>
-            </div>
-            {f.dtf && (
-              <div>
-                <label className={label}>Metros de DTF (opcional)</label>
-                <input type="text" inputMode="decimal" value={f.dtf_metros} onChange={(e) => set('dtf_metros', e.target.value)} className={input} placeholder="Ej. 2.5" />
-              </div>
-            )}
-          </div>
-
-          {/* FLETES */}
-          <div className="mt-5">
-            <div className="mb-2 flex flex-wrap items-center gap-3">
-              <p className="text-sm font-semibold text-white">Fletes</p>
-              <label className="flex items-center gap-2 text-xs text-slate-300">
-                ¿Cuántos?
-                <select value={fletes.length} onChange={(e) => cantidadFletes(Number(e.target.value))}
-                  className="rounded-lg border border-white/10 bg-[#0b1026]/70 px-2 py-1 text-sm text-white">
-                  {Array.from({ length: MAX_FLETES + 1 }, (_, i) => i).map((n) => <option key={n} value={n}>{n === 0 ? 'Ninguno' : n}</option>)}
-                </select>
-              </label>
-              {fletes.length > 0 && <span className="text-xs text-slate-400">Total fletes: <b className="text-white">{cop(totalFletes)}</b></span>}
-            </div>
-            <div className="space-y-2">
-              {fletes.map((x, i) => (
-                <div key={i} className="grid grid-cols-1 gap-3 rounded-lg border border-white/10 bg-[#0b1026]/40 p-3 sm:grid-cols-3">
-                  <div>
-                    <label className={label}>Flete {i + 1}: descripción</label>
-                    <select value={x.tipo} onChange={(e) => setFlete(i, 'tipo', e.target.value)} className={input}>
-                      {TIPOS_FLETE.map((t) => <option key={t}>{t}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className={label}>{x.tipo === 'Otro' ? 'Describe el flete' : 'Detalle'}</label>
-                    <input value={x.tipo === 'Otro' ? x.otro : ''} disabled={x.tipo !== 'Otro'} onChange={(e) => setFlete(i, 'otro', e.target.value)} className={input} />
-                  </div>
-                  <div>
-                    <label className={label}>Precio</label>
-                    <input type="text" inputMode="decimal" value={x.precio} onChange={(e) => setFlete(i, 'precio', e.target.value)} className={input} />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* GASTOS ADICIONALES */}
-          <div className="mt-5">
-            <div className="mb-2 flex flex-wrap items-center gap-3">
-              <p className="text-sm font-semibold text-white">Gastos adicionales (empaque, marcación, otros)</p>
-              <label className="flex items-center gap-2 text-xs text-slate-300">
-                ¿Cuántos?
-                <select value={gastos.length} onChange={(e) => cantidadGastos(Number(e.target.value))}
-                  className="rounded-lg border border-white/10 bg-[#0b1026]/70 px-2 py-1 text-sm text-white">
-                  {Array.from({ length: MAX_GASTOS + 1 }, (_, i) => i).map((n) => <option key={n} value={n}>{n === 0 ? 'Ninguno' : n}</option>)}
-                </select>
-              </label>
-              {gastos.length > 0 && <span className="text-xs text-slate-400">Total gastos: <b className="text-white">{cop(totalGastos)}</b></span>}
-            </div>
-            <div className="space-y-2">
-              {gastos.map((x, i) => (
-                <div key={i} className="grid grid-cols-1 gap-3 rounded-lg border border-white/10 bg-[#0b1026]/40 p-3 sm:grid-cols-12">
-                  <div className="sm:col-span-4">
-                    <label className={label}>Gasto {i + 1}: descripción</label>
-                    <input value={x.descripcion} onChange={(e) => setGasto(i, 'descripcion', e.target.value)} className={input} />
-                  </div>
-                  <div className="sm:col-span-2">
-                    <label className={label}>Cantidad</label>
-                    <input type="text" inputMode="decimal" value={x.cantidad} onChange={(e) => setGasto(i, 'cantidad', e.target.value)} className={input} />
-                  </div>
-                  <div className="sm:col-span-3">
-                    <label className={label}>Valor unitario</label>
-                    <input type="text" inputMode="decimal" value={x.valor_unitario} onChange={(e) => setGasto(i, 'valor_unitario', e.target.value)} className={input} />
-                  </div>
-                  <div className="sm:col-span-3">
-                    <label className={label}>Valor total</label>
-                    <div className={`${input} bg-violet-500/10 font-semibold text-violet-300`}>{cop(totalGasto(x))}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {(fletes.length > 0 || gastos.length > 0) && (
-            <p className="mt-4 text-right text-sm text-slate-300">Fletes + gastos adicionales: <b className="text-emerald-300">{cop(totalFletes + totalGastos)}</b></p>
+    <div className="p-4">
+      <form id="form-alerta" onSubmit={guardar} className="mb-4 space-y-3 rounded-xl border border-white/10 bg-white/5 p-4">
+        <p className="text-sm font-semibold text-white">{editId ? 'Editar alerta' : 'Nueva alerta o pendiente'}</p>
+        <div className="flex flex-wrap gap-2">
+          <input value={f.titulo} onChange={(e) => set('titulo', e.target.value)} placeholder="Tarea o seguimiento..."
+            className={`min-w-[200px] flex-1 ${input}`} />
+          {!cliente && (
+            <>
+              <input list="clientes-agenda" value={empresa} onChange={(e) => setEmpresa(e.target.value)} placeholder="Empresa / cliente"
+                className={`w-52 ${input}`} />
+              <datalist id="clientes-agenda">{clientes.map((c) => <option key={c} value={c} />)}</datalist>
+            </>
           )}
-        </fieldset>
+          <input type="date" value={f.fecha} onChange={(e) => set('fecha', e.target.value)} className={input} aria-label="Fecha límite" />
+        </div>
 
-        {error && <p className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</p>}
-        <div className="mt-6 flex justify-end gap-3">
-          <button type="button" onClick={onClose} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-slate-300 hover:bg-white/5">Cancelar</button>
-          <button disabled={guardando} className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50">
-            {guardando ? 'Guardando...' : 'Guardar'}
-          </button>
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <p className="mb-1 text-xs text-slate-400">Rango de hora *</p>
+            <div className="flex items-center gap-2">
+              <input type="time" value={f.ini} onChange={(e) => set('ini', e.target.value)} className={input} aria-label="Desde" />
+              <span className="text-xs text-slate-400">a</span>
+              <input type="time" value={f.fin} onChange={(e) => set('fin', e.target.value)} className={input} aria-label="Hasta" />
+            </div>
+          </div>
+
+          <label className="flex cursor-pointer items-center gap-2 pb-2 text-sm text-slate-200">
+            <input type="checkbox" checked={f.partido} onChange={(e) => set('partido', e.target.checked)} />
+            Horario partido (2 rangos)
+          </label>
+
+          {f.partido && (
+            <div>
+              <p className="mb-1 text-xs text-slate-400">Segundo rango *</p>
+              <div className="flex items-center gap-2">
+                <input type="time" value={f.ini2} onChange={(e) => set('ini2', e.target.value)} className={input} aria-label="Segundo rango desde" />
+                <span className="text-xs text-slate-400">a</span>
+                <input type="time" value={f.fin2} onChange={(e) => set('fin2', e.target.value)} className={input} aria-label="Segundo rango hasta" />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          {!editId && (
+            <label className="flex items-center gap-2 text-xs text-slate-300">
+              <input type="checkbox" checked={aGoogle} onChange={(e) => setAGoogle(e.target.checked)} />
+              {apiDisponible ? 'Sincronizar automáticamente con Google Calendar' : 'Abrir Google Calendar al guardar para agregar el evento'}
+            </label>
+          )}
+          <div className="ml-auto flex gap-2">
+            {editId && <button type="button" onClick={limpiarForm} className="rounded-lg border border-white/15 px-4 py-2 text-sm text-slate-200 hover:bg-white/10">Cancelar</button>}
+            <button className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500">{editId ? 'Guardar cambios' : 'Agregar'}</button>
+          </div>
         </div>
       </form>
+
+      {error && <p className="mb-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</p>}
+      {aviso && <p className="mb-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">{aviso}</p>}
+
+      <div className="mb-3 flex flex-wrap gap-2 text-xs">
+        {FILTROS.map(([k, t]) => (
+          <button key={k} onClick={() => setFiltro(k)}
+            className={`rounded-full border px-3 py-1 ${filtro === k ? 'border-blue-400 bg-blue-500/20 text-white' : 'border-white/10 text-slate-300 hover:bg-white/5'}`}>
+            {t} ({cuentas[k]})
+          </button>
+        ))}
+        {global && (
+          <button onClick={() => setFiltro('seguimientos')}
+            className={`rounded-full border px-3 py-1 ${filtro === 'seguimientos' ? 'border-blue-400 bg-blue-500/20 text-white' : 'border-white/10 text-slate-300 hover:bg-white/5'}`}>
+            Seguimientos comerciales ({seguimientos.length})
+          </button>
+        )}
+      </div>
+
+      {filtro !== 'seguimientos' && (
+        <div className="mb-4 space-y-3 rounded-xl border border-white/10 bg-white/5 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <input value={busqueda} onChange={(e) => setBusqueda(e.target.value)} placeholder="Buscar tarea, cliente, cotización o creador…"
+              className={`min-w-[220px] flex-1 ${input}`} />
+            <select value={fEstado} onChange={(e) => setFEstado(e.target.value)} className={input} aria-label="Estado">
+              <option value="Todos">Todos los estados</option>
+              <option>Pendiente</option><option>En curso</option><option>Completado</option>
+            </select>
+            <button type="button" onClick={() => setAvanzado((v) => !v)} className={boton}>{avanzado ? 'Ocultar filtros' : 'Más filtros'}</button>
+            {hayFiltros && <button type="button" onClick={limpiarFiltros} className={boton}>Limpiar</button>}
+            <span className="text-xs text-slate-400">{visibles.length} de {items.length}</span>
+            <div className="ml-auto flex gap-2">
+              <button type="button" onClick={() => exportar('csv')} className={boton}>Exportar CSV</button>
+              <button type="button" onClick={() => exportar('excel')} className="rounded-md border border-emerald-400/40 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-500/10">Exportar Excel</button>
+            </div>
+          </div>
+          {avanzado && (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">Creada por</label>
+                <select value={fCreador} onChange={(e) => setFCreador(e.target.value)} className={`w-full ${input}`}>
+                  <option value="Todos">Todos</option>{creadores.map((c) => <option key={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">Cliente / empresa</label>
+                <select value={fCliente} onChange={(e) => setFCliente(e.target.value)} className={`w-full ${input}`}>
+                  <option value="Todos">Todos</option>{empresas.map((c) => <option key={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">Fecha límite (desde – hasta)</label>
+                <div className="flex gap-1">
+                  <input type="date" value={fDesde} onChange={(e) => setFDesde(e.target.value)} className={`w-full ${input}`} />
+                  <input type="date" value={fHasta} onChange={(e) => setFHasta(e.target.value)} className={`w-full ${input}`} />
+                </div>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">Fecha de creación (desde – hasta)</label>
+                <div className="flex gap-1">
+                  <input type="date" value={fCreadaDesde} onChange={(e) => setFCreadaDesde(e.target.value)} className={`w-full ${input}`} />
+                  <input type="date" value={fCreadaHasta} onChange={(e) => setFCreadaHasta(e.target.value)} className={`w-full ${input}`} />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {cargando && <p className="text-sm text-slate-400">Cargando alertas…</p>}
+      {!cargando && filtro !== 'seguimientos' && !visibles.length && !error && <p className="text-sm text-slate-400">{filtro === 'archivo' ? 'El archivo está vacío.' : hayFiltros ? 'Ninguna alerta coincide con los filtros.' : 'No hay alertas en esta vista.'}</p>}
+
+      {filtro !== 'seguimientos' && (
+        <ul className="space-y-2">
+          {visibles.map((t) => {
+            const s = semaforo(t.fecha_limite, t.estado)
+            const texto = t.titulo || t.descripcion || '(sin título)'
+            const gestiona = puedeGestionar(t)
+            const rangos = rangosDe(t)
+            return (
+              <li key={t.id} className={`flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3 ${s.cls}`}>
+                <div className="min-w-[200px] flex-1">
+                  <p className={`text-sm font-medium text-white ${t.estado === 'Completado' ? 'line-through opacity-60' : ''}`}>
+                    {ETIQUETA_TIPO[t.tipo] && <span className="mr-2 rounded-full bg-white/10 px-2 py-0.5 text-xs font-normal">{ETIQUETA_TIPO[t.tipo]}</span>}
+                    {texto}
+                  </p>
+                  {t.descripcion && t.titulo && <p className="text-xs opacity-80">✉ {t.descripcion}</p>}
+                  <p className="text-xs opacity-90">
+                    Límite: {t.fecha_limite ? soloFecha(t.fecha_limite) : '—'}
+                    {rangos.length ? ` · ⏰ ${textoRangos(t)}` : ' · sin horario'} · {s.txt}
+                    {t.n_cotizacion ? ` · Cotización ${t.n_cotizacion}` : ''}
+                  </p>
+                  <p className="text-xs opacity-80">
+                    Cliente: <b>{t.cliente || '—'}</b> · Creada por: <b>{t.usuario_nombre || t.usuario_email || '—'}</b>
+                  </p>
+                  <p className="text-xs opacity-80">📅 Creada el <b>{fmtCreada(t.created_at)}</b></p>
+                </div>
+
+                {t.fecha_limite && (
+                  <div className="flex flex-wrap items-center gap-1">
+                    {t.gcal_event_id ? (
+                      <span className="rounded-md bg-emerald-500/20 px-2 py-1 text-xs text-emerald-300">✓ En Google Calendar</span>
+                    ) : apiDisponible ? (
+                      gestiona && <button type="button" onClick={() => sincronizarFila(t)} className={boton}>Sincronizar Google Calendar</button>
+                    ) : (
+                      <>
+                        <a href={enlaceGoogleCalendar(t, 0)} target="_blank" rel="noreferrer" className={boton}>{rangos.length > 1 ? 'Calendar 1' : 'Google Calendar'}</a>
+                        {rangos.length > 1 && <a href={enlaceGoogleCalendar(t, 1)} target="_blank" rel="noreferrer" className={boton}>Calendar 2</a>}
+                      </>
+                    )}
+                    <button type="button" onClick={() => descargarIcs(t)} className={boton} title="Descargar archivo .ics (Google, Outlook, Apple)">.ics</button>
+                  </div>
+                )}
+
+                {gestiona ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {t.estado !== 'Completado'
+                      ? <button onClick={() => cambiarEstado(t.id, 'Completado')} className="rounded-md bg-emerald-600/80 px-2 py-1 text-xs text-white hover:bg-emerald-500">✓ Completar</button>
+                      : <button onClick={() => cambiarEstado(t.id, 'Pendiente')} className={boton}>Reabrir</button>}
+                    <select value={t.estado || 'Pendiente'} onChange={(e) => cambiarEstado(t.id, e.target.value)}
+                      className="rounded-md border border-white/10 bg-[#0b1026]/70 px-2 py-1 text-xs text-white">
+                      <option>Pendiente</option><option>En curso</option><option>Completado</option>
+                    </select>
+                    <button onClick={() => editar(t)} className="text-xs text-blue-300 hover:text-blue-200">Editar</button>
+                    <button onClick={() => borrar(t)} className="text-xs text-red-300 hover:text-red-200">Eliminar</button>
+                  </div>
+                ) : (
+                  <span className="text-xs text-slate-400">Solo la puede modificar quien la creó</span>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+
+      {mostrarSeguimientos && (
+        <div className="mt-5">
+          <p className="mb-2 text-sm font-semibold text-blue-300">Seguimiento comercial (cotizaciones pendientes hace {DIAS_SEGUIMIENTO}+ días)</p>
+          {!seguimientos.length && <p className="text-sm text-slate-400">Sin cotizaciones por seguir.</p>}
+          <ul className="space-y-2">
+            {seguimientos.map((c) => (
+              <li key={c.id} className="flex flex-wrap items-center gap-3 rounded-xl border border-blue-500/40 bg-blue-500/10 px-4 py-3">
+                <div className="min-w-[200px] flex-1">
+                  <p className="text-sm font-medium text-white">Cotización {c.n_cotizacion || '—'} · {c.cliente || 'sin cliente'}</p>
+                  <p className="text-xs text-blue-200">Pendiente hace {c.dias} días{c.usuario_email ? ` · Vendedor: ${c.usuario_email}` : ''}</p>
+                </div>
+                <button onClick={() => desdeSeguimiento(c)} className={boton}>+ Crear alerta de seguimiento</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   )
 }
