@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import useEmpresas from '../lib/useEmpresas'
 
 const cop = (n) => (Number(n) || 0).toLocaleString('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 })
 const input = 'w-full rounded-lg border border-white/10 bg-[#0b1026]/70 px-3 py-2 text-sm text-white outline-none focus:border-blue-500'
@@ -63,7 +64,7 @@ function armarCatalogo(cotizaciones) {
 }
 
 export default function Cotizador({ cotizaciones, onCrear }) {
-  const clientes = useMemo(() => [...new Set(cotizaciones.map((c) => c.cliente).filter(Boolean))].sort(), [cotizaciones])
+  const clientes = useEmpresas() // empresas de la Base de Datos
   const catalogo = useMemo(() => armarCatalogo(cotizaciones), [cotizaciones])
   const [cliente, setCliente] = useState('')
   const [lineas, setLineas] = useState([lineaVacia()])
