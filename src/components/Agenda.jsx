@@ -2,7 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../supabaseClient'
 import { diasEntre, fmtFecha, hhmm, hoyStr, rangosDe, soloFecha, textoRangos } from '../lib/fechas'
 import { descargarCsv, descargarExcel, registrarExportacion } from '../lib/exportar'
-import { apiDisponible, crearEventoGoogle, descargarIcs, enlaceGoogleCalendar } from '../lib/googleCalendar'
+import { apiDisponible, borrarEventosGoogle, descargarIcs, enlaceGoogleCalendar, sincronizarAlerta, tokenVigente } from '../lib/googleCalendar'
+
+// Alertas que genera el sistema (no las escribe una persona)
+const ETIQUETA_TIPO = { entrega: '📦 Entrega', entrega_anticipada: '📦 Entrega anticipada', fecha_especial: '🎉 Fecha especial' }
 
 const DIAS_SEMANA = 7
 const DIAS_SEGUIMIENTO = 7
@@ -84,7 +87,8 @@ export default function Agenda({
   const cargar = useCallback(async () => {
     setCargando(true)
     let q = supabase.from('alertas').select('*')
-    if (cotizacionId) q = q.eq('cotizacion_id', cotizacionId)
+    // El id se envía como texto: la columna es texto y sirve con ids uuid o numéricos (evita "invalid input syntax for type uuid")
+    if (cotizacionId !== undefined && cotizacionId !== null) q = q.eq('cotizacion_id', String(cotizacionId))
     const { data, error } = await q
     if (error) {
       setError(`No se pudieron cargar las alertas: ${error.message}`)
@@ -109,10 +113,7 @@ export default function Agenda({
 
   const limpiarForm = () => { setF(FORM_VACIO); setEditId(null); if (!cliente) setEmpresa('') }
 
-  const sincronizar = async (alerta) => {
-    const id = await crearEventoGoogle(alerta)
-    await supabase.from('alertas').update({ gcal_event_id: id }).eq('id', alerta.id)
-  }
+  const sincronizar = (alerta) => sincronizarAlerta(alerta)
 
   const validar = () => {
     if (!f.titulo.trim() || !f.fecha) return 'Escribe la tarea y la fecha límite.'
@@ -158,7 +159,8 @@ export default function Agenda({
         estado: 'Pendiente',
         usuario_email: user.email,
         usuario_nombre: nombre || user.email,
-        cotizacion_id: cotizacionId || null,
+        cotizacion_id: cotizacionId !== undefined && cotizacionId !== null ? String(cotizacionId) : null,
+        tipo: 'manual',
         n_cotizacion: nCotizacion || null,
       })
       .select()
@@ -219,6 +221,12 @@ export default function Agenda({
     const { data, error } = await supabase.from('alertas').delete().eq('id', a.id).select('id')
     if (error) setError(error.message)
     else if (!data?.length) setError('Solo quien creó la alerta (o el super admin) puede eliminarla.')
+    else if (a.gcal_event_id && apiDisponible && tokenVigente()) {
+      // también se quita del calendario (si no hay sesión de Google activa, el evento hay que borrarlo allí a mano)
+      try { await borrarEventosGoogle(a.gcal_event_id) } catch { setAviso('La alerta se eliminó, pero no se pudo quitar el evento de Google Calendar.') }
+    } else if (a.gcal_event_id) {
+      setAviso('La alerta se eliminó. Su evento sigue en Google Calendar: conéctalo y vuelve a intentar, o bórralo allí.')
+    }
     if (editId === a.id) limpiarForm()
     refrescar()
   }
@@ -432,7 +440,10 @@ export default function Agenda({
             return (
               <li key={t.id} className={`flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3 ${s.cls}`}>
                 <div className="min-w-[200px] flex-1">
-                  <p className={`text-sm font-medium text-white ${t.estado === 'Completado' ? 'line-through opacity-60' : ''}`}>{texto}</p>
+                  <p className={`text-sm font-medium text-white ${t.estado === 'Completado' ? 'line-through opacity-60' : ''}`}>
+                    {ETIQUETA_TIPO[t.tipo] && <span className="mr-2 rounded-full bg-white/10 px-2 py-0.5 text-xs font-normal">{ETIQUETA_TIPO[t.tipo]}</span>}
+                    {texto}
+                  </p>
                   {t.descripcion && t.titulo && <p className="text-xs opacity-80">✉ {t.descripcion}</p>}
                   <p className="text-xs opacity-90">
                     Límite: {t.fecha_limite ? soloFecha(t.fecha_limite) : '—'}
