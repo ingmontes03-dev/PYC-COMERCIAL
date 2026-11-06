@@ -32,10 +32,10 @@ export default function Historial({ registroId, refresh }) {
       setCargando(true)
       let q = supabase.from('auditoria_logs').select('*').order('fecha_hora', { ascending: false }).limit(500)
       // Historial de una cotización: incluye también sus alertas (cotizacion_id)
-      if (registroId) q = q.or(`registro_id.eq.${registroId},cotizacion_id.eq.${registroId}`)
+      if (registroId) q = q.or(`registro_id.eq.${String(registroId)},cotizacion_id.eq.${String(registroId)}`)
       const { data, error } = await q
       if (!activo) return
-      if (error) { setError(`No se pudo cargar la auditoría: ${error.message}`); setLogs([]) }
+      if (error) { setError(`No se pudo cargar la auditoría: ${error.message}${/uuid/i.test(error.message) ? ' — ejecuta completo el supabase_schema.sql actualizado en el SQL Editor de Supabase (convierte los ids de auditoría a texto).' : ''}`); setLogs([]) }
       else { setError(''); setLogs(data || []) }
       setCargando(false)
     }
