@@ -109,6 +109,7 @@ const describeVencida = (a, hoy) => {
 }
 const porHora = (a, b) => (rangosDe(a)[0]?.ini || '99').localeCompare(rangosDe(b)[0]?.ini || '99')
 const porFechaHora = (a, b) => soloFecha(a.fecha_limite).localeCompare(soloFecha(b.fecha_limite)) || porHora(a, b)
+const esEntrega = (a) => a.tipo === 'entrega' || a.tipo === 'entrega_anticipada'
 const ORDINALES = ['Primero', 'Segundo', 'Tercero', 'Cuarto', 'Quinto']
 
 export default function VozAlertas({ user, nombre, cotizaciones = [], version = 0 }) {
@@ -167,7 +168,7 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
 
   // Alertas propias y abiertas
   const propias = useCallback(
-    () => alertas.filter((a) => a.estado !== 'Completado' && a.fecha_limite && (a.usuario_id === user.id || a.usuario_email === user.email)),
+    () => alertas.filter((a) => a.estado !== 'Completado' && a.fecha_limite && !esEntrega(a) && (a.usuario_id === user.id || a.usuario_email === user.email)),
     [alertas, user.id, user.email]
   )
 
@@ -176,6 +177,37 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
     const hoy = hoyStr()
     return propias().filter((a) => diasEntre(hoy, soloFecha(a.fecha_limite)) <= 0)
   }, [propias])
+
+  // --- Entregas: fecha de entrega y fecha anticipada de cada cotización aprobada (alertas del sistema) ---
+  const textoEntregas = useCallback(() => {
+    const hoy = hoyStr()
+    const sig = manana()
+    const items = []
+    cotizaciones.filter((c) => c.estado === 'Aprobado').forEach((c) => {
+      const base = `${c.cliente || 'sin cliente'}${c.n_cotizacion ? `, cotización ${c.n_cotizacion}` : ''}`
+      const f1 = soloFecha(c.fecha_entrega)
+      const f2 = soloFecha(c.fecha_entrega_anticipada)
+      if (f1) items.push({ f: f1, t: `Entrega de ${base}` })
+      if (f2) items.push({ f: f2, t: `Entrega anticipada de ${base}` })
+    })
+    items.sort((a, b) => a.f.localeCompare(b.f))
+    const deHoy = items.filter((i) => i.f === hoy)
+    const deManana = items.filter((i) => i.f === sig)
+    const proximas = items.filter((i) => i.f > sig)
+    const vencidas = alertas.filter((a) => esEntrega(a) && a.estado !== 'Completado' && soloFecha(a.fecha_limite) && soloFecha(a.fecha_limite) < hoy
+      && (a.usuario_id === user.id || a.usuario_email === user.email))
+    const partes = []
+    if (deHoy.length) partes.push(`Hoy tienes ${plural(deHoy.length, 'entrega', 'entregas')}: ${deHoy.map((i) => i.t).join('; ')}.`)
+    else partes.push('Hoy no tienes entregas.')
+    if (deManana.length) partes.push(`Mañana tienes ${plural(deManana.length, 'entrega', 'entregas')}: ${deManana.map((i) => i.t).join('; ')}.`)
+    if (proximas.length) {
+      partes.push(`Próximas entregas.`)
+      proximas.slice(0, 5).forEach((i) => partes.push(`${i.t}, el ${fechaHablada(i.f)}.`))
+      if (proximas.length > 5) partes.push(`Y ${proximas.length - 5} más adelante.`)
+    }
+    if (vencidas.length) partes.push(`Atención: tienes ${plural(vencidas.length, 'alerta de entrega vencida', 'alertas de entrega vencidas')} sin completar.`)
+    return partes.join(' ')
+  }, [cotizaciones, alertas, user.id, user.email])
 
   // --- Hoy, mañana y los pendientes más próximos ---
   const textoAgenda = useCallback(() => {
@@ -199,21 +231,11 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
       vencidas.sort(porFechaHora).slice(0, 5).forEach((a) => partes.push(describeVencida(a, hoy)))
     }
 
-    const entregasManana = cotizaciones.filter((c) => c.estado === 'Aprobado' && soloFecha(c.fecha_entrega) === sig)
-    if (!deManana.length && !entregasManana.length) {
+    if (!deManana.length) {
       partes.push('Para mañana no tienes alertas programadas.')
     } else {
-      if (deManana.length) {
-        partes.push(`Para mañana tienes ${plural(deManana.length, 'pendiente', 'pendientes')}.`)
-        deManana.slice(0, 6).forEach((a) => partes.push(describe(a)))
-      }
-      if (entregasManana.length) {
-        partes.push(`Mañana hay ${plural(entregasManana.length, 'entrega programada', 'entregas programadas')}${
-          entregasManana.length <= 3
-            ? `: ${entregasManana.map((c) => `${c.cliente || 'sin cliente'}${c.n_cotizacion ? `, cotización ${c.n_cotizacion}` : ''}`).join('; ')}`
-            : ''
-        }.`)
-      }
+      partes.push(`Para mañana tienes ${plural(deManana.length, 'pendiente', 'pendientes')}.`)
+      deManana.slice(0, 6).forEach((a) => partes.push(describe(a)))
     }
 
     if (proximos.length) {
@@ -221,8 +243,9 @@ export default function VozAlertas({ user, nombre, cotizaciones = [], version = 
       proximos.slice(0, 5).forEach((a) => partes.push(describeConFecha(a)))
       if (proximos.length > 5) partes.push(`Y ${proximos.length - 5} más adelante.`)
     }
+    partes.push(textoEntregas())
     return partes.join(' ')
-  }, [mias, propias, cotizaciones])
+  }, [mias, propias, textoEntregas])
 
   // --- Cotizaciones pendientes y aprobadas ---
   const textoCotizaciones = useCallback(() => {
