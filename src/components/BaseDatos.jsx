@@ -3,6 +3,7 @@ import { supabase } from '../supabaseClient'
 import { tiene } from '../lib/permisos'
 import { descargarCsv, descargarExcel, registrarExportacion } from '../lib/exportar'
 import { fmtFecha, hoyStr, soloFecha } from '../lib/fechas'
+import { descargarIcs, enlaceGoogleCalendar } from '../lib/googleCalendar'
 
 export const FIESTAS = [
   'Día del Niño',
@@ -318,6 +319,15 @@ export default function BaseDatos({ user, perfil }) {
           <div>
             <label className={label}>Fecha especial de compra (programa una alarma)</label>
             <input type="date" value={emp.fecha_especial} onChange={(e) => setE('fecha_especial', e.target.value)} className={input} />
+            {emp.fecha_especial && /^\d{4}-\d{2}-\d{2}$/.test(emp.fecha_especial) && (() => {
+              const ev = { id: `fe-${emp.empresa}`, titulo: `Fecha especial de compra${emp.empresa ? ` - ${emp.empresa}` : ''}`, cliente: emp.empresa, tipo: 'fecha_especial', fecha_limite: emp.fecha_especial }
+              return (
+                <p className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+                  <a href={enlaceGoogleCalendar(ev)} target="_blank" rel="noreferrer" className="rounded-md bg-sky-600 px-2 py-1 font-medium text-white hover:bg-sky-500">📅 Google Calendar</a>
+                  <button type="button" onClick={() => descargarIcs(ev)} className="rounded-md bg-white/10 px-2 py-1 text-slate-200 hover:bg-white/20">.ics</button>
+                </p>
+              )
+            })()}
           </div>
           <div>
             <label className={label}>Avisar con anticipación</label>
