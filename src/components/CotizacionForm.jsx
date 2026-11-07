@@ -315,7 +315,7 @@ export default function CotizacionForm({ registro, borrador, user, onClose, onSa
     } else {
       const { error } = await supabase
         .from('cotizaciones')
-        .insert({ ...payload, usuario_email: user.email })
+        .insert({ ...payload, usuario_id: user.id, usuario_email: user.email })
         .select('id')
         .single()
       if (error) { setError(mensajeError(error)); setGuardando(false); return }
