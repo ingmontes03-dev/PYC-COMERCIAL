@@ -333,8 +333,8 @@ export default function CotizacionForm({ registro, borrador, user, onClose, onSa
   )
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <form onSubmit={guardar} className="max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-2xl border border-white/10 bg-[#141a3d] p-6 shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-0 sm:p-4">
+      <form onSubmit={guardar} className="h-full w-full max-w-5xl overflow-y-auto rounded-none border border-white/10 bg-[#141a3d] p-4 pb-24 shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl sm:p-6 sm:pb-6">
         <div className="mb-5 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-white">{registro ? 'Editar cotización' : 'Nueva cotización'}</h2>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-white">✕</button>
