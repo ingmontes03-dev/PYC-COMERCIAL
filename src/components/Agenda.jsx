@@ -159,6 +159,7 @@ export default function Agenda({
       .insert({
         ...campos,
         estado: 'Pendiente',
+        usuario_id: user.id,
         usuario_email: user.email,
         usuario_nombre: nombre || user.email,
         cotizacion_id: cotizacionId !== undefined && cotizacionId !== null ? String(cotizacionId) : null,
