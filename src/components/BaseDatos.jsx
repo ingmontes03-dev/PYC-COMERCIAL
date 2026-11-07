@@ -153,6 +153,7 @@ export default function BaseDatos({ user, perfil }) {
         ...datosAlerta(filas, empresa, avisoDias),
         estado: 'Pendiente',
         tipo: 'fecha_especial',
+        usuario_id: user.id,
         usuario_email: user.email,
         usuario_nombre: perfil.nombre || user.email,
       })
@@ -236,7 +237,7 @@ export default function BaseDatos({ user, perfil }) {
       resultado = await supabase.from('clientes_prospeccion').update({ ...filas[0], alerta_id: alertaId }).eq('id', editId).select('id')
     } else {
       resultado = await supabase.from('clientes_prospeccion')
-        .insert(filas.map((f) => ({ ...f, alerta_id: alertaId, usuario_email: user.email }))).select('id')
+        .insert(filas.map((f) => ({ ...f, alerta_id: alertaId, usuario_id: user.id, usuario_email: user.email }))).select('id')
     }
     const { data, error } = resultado
 
