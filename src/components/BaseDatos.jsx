@@ -401,13 +401,13 @@ export default function BaseDatos({ user, perfil }) {
       <div>
         <div className="mb-3 flex flex-wrap items-center gap-3">
           <input value={busqueda} onChange={(e) => setBusqueda(e.target.value)} placeholder="Buscar empresa, contacto, correo, teléfono, dirección, observaciones…"
-            className={`${input} max-w-md`} />
+            className={`${input} w-full md:max-w-md`} />
           <select value={filtroFiesta} onChange={(e) => setFiltroFiesta(e.target.value)} className={`${input} max-w-xs`}>
             <option>Todas</option>
             {FIESTAS.map((f) => <option key={f}>{f}</option>)}
           </select>
           <span className="text-xs text-slate-400">{filtrados.length} de {lista.length} registros</span>
-          <div className="ml-auto flex gap-2">
+          <div className="flex gap-2 md:ml-auto">
             <button onClick={() => exportar('csv')} className="rounded-lg border border-white/15 px-3 py-2 text-xs text-slate-100 hover:bg-white/10">Exportar CSV</button>
             <button onClick={() => exportar('excel')} className="rounded-lg border border-emerald-400/40 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/10">Exportar Excel</button>
           </div>
@@ -416,7 +416,48 @@ export default function BaseDatos({ user, perfil }) {
         {errorLista && <p className="mb-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{errorLista}</p>}
         {aviso && <p className="mb-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">{aviso}</p>}
 
-        <div className="overflow-x-auto rounded-xl border border-white/10">
+        {/* CELULAR: tarjetas */}
+        <div className="space-y-3 md:hidden">
+          {cargando && <p className="p-4 text-center text-sm text-slate-400">Cargando…</p>}
+          {!cargando && !filtrados.length && <p className="p-4 text-center text-sm text-slate-400">Sin registros.</p>}
+          {filtrados.map((p) => (
+            <article key={p.id} className={`rounded-xl border border-white/10 bg-[#141a3d] p-3 ${editId === p.id ? 'ring-1 ring-blue-400' : ''}`}>
+              <p className="text-base font-semibold text-white">{p.empresa}</p>
+              <p className="text-sm text-slate-300">{p.nombre_contacto || '—'}</p>
+              <div className="mt-2 flex flex-wrap gap-2 text-sm">
+                {p.telefono && (
+                  <>
+                    <a href={`tel:${(p.telefono || '').replace(/[^\d+]/g, '')}`} className="rounded-lg bg-emerald-500/15 px-3 py-2 text-emerald-200">📞 Llamar</a>
+                    <a href={`https://wa.me/${(p.telefono || '').replace(/\D/g, '')}`} target="_blank" rel="noreferrer" className="rounded-lg bg-emerald-500/15 px-3 py-2 text-emerald-200">💬 WhatsApp</a>
+                  </>
+                )}
+                {p.correo && <a href={`mailto:${p.correo}`} className="rounded-lg bg-sky-500/15 px-3 py-2 text-sky-200">✉ Correo</a>}
+              </div>
+              {p.telefono && <p className="mt-1 text-xs text-slate-400">{p.telefono}</p>}
+              {p.direccion && <p className="mt-1 text-sm text-slate-300">📍 {p.direccion}</p>}
+              <div className="mt-2 text-xs">
+                {p.fiesta && <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-violet-300">{p.fiesta}</span>}
+                {p.detalle && <span className="ml-2 text-slate-400">{p.detalle}</span>}
+                {p.fecha_especial && <span className="mt-1 block text-amber-300">📅 {soloFecha(p.fecha_especial)}</span>}
+              </div>
+              {p.observaciones && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer text-xs text-blue-300">Ver observaciones</summary>
+                  <p className="mt-1 whitespace-pre-wrap text-xs text-slate-300">{p.observaciones}</p>
+                </details>
+              )}
+              <p className="mt-2 text-[11px] text-slate-500">{p.usuario_email || '—'} · {fmtRegistro(p.created_at) || '—'}</p>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
+                <button onClick={() => agregarContacto(p)} className="rounded-lg bg-violet-500/15 py-2 text-violet-200">+ Contacto</button>
+                {puedeEditar(p) ? <button onClick={() => editar(p)} className="rounded-lg bg-blue-600/20 py-2 text-blue-200">Editar</button> : <span />}
+                {puedeEliminar(p) ? <button onClick={() => eliminar(p)} className="rounded-lg bg-red-500/15 py-2 text-red-200">Eliminar</button> : <span />}
+              </div>
+            </article>
+          ))}
+        </div>
+
+        {/* ESCRITORIO: tabla */}
+        <div className="hidden overflow-x-auto rounded-xl border border-white/10 md:block">
           <table className="w-full min-w-[1300px] text-sm">
             <thead className="bg-[#1b2150] text-xs uppercase tracking-wide text-slate-300">
               <tr>
