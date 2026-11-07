@@ -15,6 +15,8 @@ import Usuarios from './Usuarios'
 
 const cop = (n) => (Number(n) || 0).toLocaleString('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 })
 const pct = (n) => (n === null || n === undefined || n === '' ? '—' : `${Number(n).toLocaleString('es-CO', { maximumFractionDigits: 2 })}%`)
+const ICONO_TAB = { agenda: '📅', cotizador: '🧮', bd: '🗂️', historial: '🕘', usuarios: '👥' }
+const TAB_CORTO = { agenda: 'Agenda', cotizador: 'Cotizador', bd: 'Clientes', historial: 'Historial', usuarios: 'Usuarios' }
 const sel = 'rounded-lg border border-white/10 bg-[#0b1026]/70 px-3 py-2 text-sm text-white outline-none focus:border-blue-500'
 
 const ESTADO_CLS = {
@@ -168,16 +170,22 @@ export default function Dashboard({ user, perfil }) {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-[#0b1026] via-[#141a3d] to-[#2a1458] text-slate-200">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-6 py-4">
+      {/* Ajustes para celular: campos de 16 px (evita el zoom automático de iPhone) y botones fáciles de tocar */}
+      <style>{`@media (max-width: 767px){
+        input:not([type=checkbox]):not([type=radio]), select, textarea { font-size: 16px !important; min-height: 44px; }
+        button, summary { min-height: 40px; }
+        html { -webkit-text-size-adjust: 100%; }
+      }`}</style>
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-3 sm:gap-3 sm:px-6 sm:py-4">
         <h1 className="text-xl font-bold text-white">PYC Comercial</h1>
         <div className="flex items-center gap-3 text-sm">
           <span className="rounded-full bg-violet-500/20 px-2 py-0.5 text-xs text-violet-300">{ROLES[perfil.rol]?.t || perfil.rol}</span>
-          <span className="text-slate-300">{user.email}</span>
+          <span className="hidden text-slate-300 sm:inline">{user.email}</span>
           <button onClick={() => supabase.auth.signOut()} className="rounded-lg border border-white/15 px-3 py-1.5 text-slate-200 hover:bg-white/10">Cerrar Sesión</button>
         </div>
       </header>
 
-      <main className="space-y-5 p-6">
+      <main className="space-y-4 p-3 pb-28 sm:space-y-5 sm:p-6 md:pb-6">
         {!miembro && (
           <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-6 text-amber-200">
             Tu cuenta aún no tiene un rol asignado. Pide al Super Admin de PYC Comercial que te asigne el rol Vendedor.
@@ -186,7 +194,7 @@ export default function Dashboard({ user, perfil }) {
 
         {miembro && (
           <>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
               <Kpi titulo="Cotizaciones" valor={kpis.total} sub={`${kpis.aprobadas} aprobadas`} />
               <Kpi titulo="Valor cotizado" valor={cop(kpis.valorCotizado)} />
               <Kpi titulo="Valor aprobado" valor={cop(kpis.valorAprobado)} />
@@ -206,25 +214,60 @@ export default function Dashboard({ user, perfil }) {
             )}
 
             <section className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur">
-              <div className="flex flex-wrap items-center gap-3 p-4">
-                <input value={busqueda} onChange={(e) => setBusqueda(e.target.value)} placeholder="Buscar cotización, cliente, OP…" className={`${sel} min-w-[220px] flex-1`} />
-                <select value={filtroEstado} onChange={(e) => setFiltroEstado(e.target.value)} className={sel}>
+              <div className="flex flex-wrap items-center gap-2 p-3 sm:gap-3 sm:p-4">
+                <input value={busqueda} onChange={(e) => setBusqueda(e.target.value)} placeholder="Buscar cotización, cliente, OP…" className={`${sel} w-full sm:w-auto sm:min-w-[220px] sm:flex-1`} />
+                <select value={filtroEstado} onChange={(e) => setFiltroEstado(e.target.value)} className={`${sel} flex-1 sm:flex-none`}>
                   {['Todos', 'Pendiente', 'Aprobado', 'Negado'].map((e) => <option key={e}>{e}</option>)}
                 </select>
-                <select value={filtroMes} onChange={(e) => setFiltroMes(e.target.value)} className={sel}>
+                <select value={filtroMes} onChange={(e) => setFiltroMes(e.target.value)} className={`${sel} flex-1 sm:flex-none`}>
                   <option value="Todos">Todos los meses</option>
                   {MESES.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
                 </select>
                 <button onClick={() => exportar('csv')} className="rounded-lg border border-white/15 px-3 py-2 text-sm hover:bg-white/10">Exportar CSV</button>
                 <button onClick={() => exportar('excel')} className="rounded-lg border border-emerald-400/40 px-3 py-2 text-sm text-emerald-200 hover:bg-emerald-500/10">Exportar Excel</button>
                 {puedeCrear && (
-                  <button onClick={() => setForm({})} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500">+ Nueva cotización</button>
+                  <button onClick={() => setForm({})} className="hidden rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 sm:inline-block">+ Nueva cotización</button>
                 )}
               </div>
 
               {error && <p className="mx-4 mb-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</p>}
 
-              <div className="overflow-x-auto">
+              {/* CELULAR: tarjetas en vez de tabla */}
+              <div className="space-y-3 p-3 pt-0 md:hidden">
+                {cargando && <p className="p-4 text-center text-sm text-slate-400">Cargando…</p>}
+                {!cargando && !filtradas.length && <p className="p-4 text-center text-sm text-slate-400">No hay cotizaciones para mostrar.</p>}
+                {filtradas.map((c) => (
+                  <article key={c.id} className="rounded-xl border border-white/10 bg-[#141a3d] p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-xs text-slate-400">Cotización</p>
+                        <p className="font-semibold text-white">{c.n_cotizacion}</p>
+                      </div>
+                      <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${ESTADO_CLS[c.estado] || ''}`}>{c.estado}</span>
+                    </div>
+                    <p className="mt-1 truncate text-base font-medium text-white">{c.cliente}</p>
+                    {c.referencia && <p className="truncate text-xs text-slate-400">{c.referencia}</p>}
+                    <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-sm">
+                      <div><dt className="text-xs text-slate-400">Valor total</dt><dd className="text-white">{cop(c.valor_total)}</dd></div>
+                      <div><dt className="text-xs text-slate-400">Valor aprobado</dt><dd>{c.valor_aprobado ? cop(c.valor_aprobado) : '—'}</dd></div>
+                      <div><dt className="text-xs text-slate-400">Fecha envío</dt><dd>{soloFecha(c.fecha_envio) || '—'}</dd></div>
+                      <div><dt className="text-xs text-slate-400">Entrega</dt><dd>{soloFecha(c.fecha_entrega) || '—'}</dd></div>
+                      {c.fecha_entrega_anticipada && <div><dt className="text-xs text-slate-400">Entrega anticipada</dt><dd>{soloFecha(c.fecha_entrega_anticipada)}</dd></div>}
+                      {c.contacto && <div><dt className="text-xs text-slate-400">Contacto</dt><dd className="truncate">{c.contacto}</dd></div>}
+                      {mostrarVendedor && <div className="col-span-2"><dt className="text-xs text-slate-400">Vendedor</dt><dd className="truncate text-xs">{c.usuario_email || '—'}</dd></div>}
+                    </dl>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                      {puedeEditar && <button onClick={() => setForm(c)} className="rounded-lg bg-blue-600/20 py-2 text-blue-200">Editar</button>}
+                      {tiene(perfil, 'agenda') && <button onClick={() => setPendientesDe(c)} className="rounded-lg bg-amber-500/15 py-2 text-amber-200">Pendientes</button>}
+                      {tiene(perfil, 'historial') && <button onClick={() => setHistorialDe(c)} className="rounded-lg bg-violet-500/15 py-2 text-violet-200">Historial</button>}
+                      {puedeEliminar && <button onClick={() => eliminar(c)} className="rounded-lg bg-red-500/15 py-2 text-red-200">Eliminar</button>}
+                    </div>
+                  </article>
+                ))}
+              </div>
+
+              {/* ESCRITORIO: tabla completa */}
+              <div className="hidden overflow-x-auto md:block">
                 <table className="w-full min-w-[1500px] text-sm">
                   <thead className="bg-[#1b2150] text-xs uppercase tracking-wide text-slate-300">
                     <tr>
@@ -294,7 +337,7 @@ export default function Dashboard({ user, perfil }) {
             </section>
 
             <section ref={seccionTabs} className="scroll-mt-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur">
-              <nav className="flex flex-wrap gap-1 border-b border-white/10 px-2 pt-2">
+              <nav className="hidden flex-wrap gap-1 border-b border-white/10 px-2 pt-2 md:flex">
                 {tabs.map(([k, t]) => (
                   <button key={k} onClick={() => setTab(k)}
                     className={`rounded-t-lg px-4 py-2 text-sm ${tab === k ? 'bg-white/10 font-semibold text-white' : 'text-slate-400 hover:text-white'}`}>
@@ -316,6 +359,30 @@ export default function Dashboard({ user, perfil }) {
         )}
       </main>
 
+      {/* CELULAR: botón flotante para crear y barra de navegación inferior */}
+      {miembro && puedeCrear && !form && (
+        <button onClick={() => setForm({})} aria-label="Nueva cotización"
+          className="fixed bottom-20 right-4 z-40 flex h-14 items-center gap-2 rounded-full bg-blue-600 px-5 text-sm font-semibold text-white shadow-xl shadow-black/40 active:scale-95 md:hidden">
+          <span className="text-xl leading-none">+</span> Cotización
+        </button>
+      )}
+      {miembro && (
+        <nav className="fixed inset-x-0 bottom-0 z-40 flex border-t border-white/10 bg-[#0b1026]/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
+          <button onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} className="flex flex-1 flex-col items-center justify-center gap-0.5 py-2 text-slate-300">
+            <span className="text-lg leading-none">📄</span><span className="text-[10px]">Cotizaciones</span>
+          </button>
+          {tabs.map(([k, t]) => (
+            <button key={k} onClick={() => { setTab(k); setTimeout(() => seccionTabs.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50) }}
+              className={`relative flex flex-1 flex-col items-center justify-center gap-0.5 py-2 ${tab === k ? 'text-white' : 'text-slate-400'}`}>
+              <span className="text-lg leading-none">{ICONO_TAB[k] || '•'}</span>
+              <span className="text-[10px]">{TAB_CORTO[k] || t}</span>
+              {k === 'agenda' && vencidas > 0 && <span className="absolute right-1/4 top-1 rounded-full bg-red-500 px-1 text-[10px] text-white">{vencidas}</span>}
+              {tab === k && <span className="absolute inset-x-3 top-0 h-0.5 rounded bg-blue-400" />}
+            </button>
+          ))}
+        </nav>
+      )}
+
       {form && (
         <CotizacionForm
           registro={form.id ? form : null}
@@ -327,8 +394,8 @@ export default function Dashboard({ user, perfil }) {
       )}
 
       {pendientesDe && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-white/10 bg-[#141a3d] shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-0 sm:p-4">
+          <div className="h-full w-full max-w-3xl overflow-y-auto rounded-none border border-white/10 bg-[#141a3d] shadow-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-2xl">
             <div className="flex items-center justify-between border-b border-white/10 p-4">
               <h2 className="font-semibold text-white">Pendientes · Cotización {pendientesDe.n_cotizacion} · {pendientesDe.cliente}</h2>
               <button onClick={() => setPendientesDe(null)} className="text-slate-400 hover:text-white">✕</button>
@@ -340,8 +407,8 @@ export default function Dashboard({ user, perfil }) {
       )}
 
       {historialDe && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-white/10 bg-[#141a3d] shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-0 sm:p-4">
+          <div className="h-full w-full max-w-3xl overflow-y-auto rounded-none border border-white/10 bg-[#141a3d] shadow-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-2xl">
             <div className="flex items-center justify-between border-b border-white/10 p-4">
               <h2 className="font-semibold text-white">Historial · Cotización {historialDe.n_cotizacion}</h2>
               <button onClick={() => setHistorialDe(null)} className="text-slate-400 hover:text-white">✕</button>
